@@ -280,25 +280,28 @@ def send_to_n8n(items):
         logger.error("N8N_WEBHOOK_URL が設定されていません。送信をスキップします。")
         return 0
 
-    success_count = 0
-    for item in items:
-        payload = {
-            "id": item["item_id"],
-            "name": item["title"],
-            "price": item["price"],
-            "url": item["url"],
-            "sellerId": item["seller_id"],
-            "itemConditionId": item["item_condition_id"],
-        }
-        try:
-            resp = requests.post(webhook_url, json=payload, timeout=10)
-            resp.raise_for_status()
-            success_count += 1
-            logger.debug(f"送信OK: {item['item_id']} / {item['title'][:30]}")
-        except requests.RequestException as e:
-            logger.warning(f"送信失敗 [{item['item_id']}]: {e}")
-        time.sleep(0.3)
-    return success_count
+    # 全件をまとめて1回のPOSTで送信（n8n実行回数を1回に節約）
+    payload = {
+        "items": [
+            {
+                "id": item["item_id"],
+                "name": item["title"],
+                "price": item["price"],
+                "url": item["url"],
+                "sellerId": item["seller_id"],
+                "itemConditionId": item["item_condition_id"],
+            }
+            for item in items
+        ]
+    }
+    try:
+        resp = requests.post(webhook_url, json=payload, timeout=30)
+        resp.raise_for_status()
+        logger.info(f"n8n一括送信成功：{len(items)} 件")
+        return len(items)
+    except requests.RequestException as e:
+        logger.error(f"n8n送信失敗: {e}")
+        return 0
 
 
 # ──────────────────────────────────────────
