@@ -165,10 +165,10 @@ async def fetch_mercari_items_async(keyword):
         items = []
         for item in results.items:
             items.append({
-                "item_id": item.id or "",
+                "item_id": item.id_ or "",
                 "title": item.name or "",
                 "price": int(item.price) if item.price else 0,
-                "url": f"https://jp.mercari.com/item/{item.id}",
+                "url": f"https://jp.mercari.com/item/{item.id_}",
                 "seller_id": str(item.seller_id) if item.seller_id else "",
                 "category_id": str(item.category_id) if hasattr(item, "category_id") and item.category_id else "",
                 "status": str(item.status) if item.status else "",
