@@ -275,7 +275,7 @@ def apply_filters(items, blocked_seller_ids, already_sent):
 # n8n Webhook送信
 # ──────────────────────────────────────────
 def send_to_n8n(items):
-    webhook_url = os.environ.get("N8N_WEBHOOK_URL")
+    webhook_url = os.environ.get("N8N_WEBHOOK_URL", "").strip()
     if not webhook_url:
         logger.error("N8N_WEBHOOK_URL が設定されていません。送信をスキップします。")
         return 0
