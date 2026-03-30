@@ -207,6 +207,9 @@ async def fetch_mercari_items_async(keyword):
                 "item_condition_id": str(item.item_condition_id) if hasattr(item, "item_condition_id") and item.item_condition_id else "",
             })
         logger.info(f"メルカリ取得件数：{len(items)} 件")
+        # デバッグ：categoryId実値確認
+        for dbg in items[:20]:
+            logger.info(f"categoryId確認: {dbg['category_id']} / {dbg['title'][:20]}")
         return items
     except Exception as e:
         logger.error(f"メルカリ取得エラー: {e}")
