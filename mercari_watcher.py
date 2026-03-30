@@ -192,10 +192,14 @@ def fetch_mercari_items(keyword: str = "カメラ", limit: int = 50) -> list[dic
     認証不要・Cookieなし。
     """
     headers = {
-        "User-Agent": "Mozilla/5.0 (compatible; MercariWatcher/1.0)",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
         "X-Platform": "web",
-        "Accept": "application/json",
-        "Accept-Language": "ja-JP,ja;q=0.9",
+        "Accept": "application/json, text/plain, */*",
+        "Accept-Language": "ja-JP,ja;q=0.9,en-US;q=0.8,en;q=0.7",
+        "Content-Type": "application/json; charset=utf-8",
+        "Origin": "https://jp.mercari.com",
+        "Referer": "https://jp.mercari.com/",
+        "DPoP": "dummy",
     }
     payload = {
         "searchSessionId": "",
