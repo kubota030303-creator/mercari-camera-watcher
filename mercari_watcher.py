@@ -69,6 +69,41 @@ CAMERA_CATEGORY_IDS = {
 
 NG_KEYWORDS = ["ジャンク", "故障", "部品取り"]
 
+# メルカリcategoryId → n8nカテゴリ名マッピング
+CATEGORY_MAP = {
+    "4006":  "mirrorless",  # ミラーレス一眼
+    "4007":  "compact",     # コンパクトデジカメ
+    "4008":  "compact",     # トイカメラ
+    "4009":  "dslr",        # デジタル一眼レフ
+    "4012":  "video",       # ビデオカメラ
+    "4023":  "action",      # アクションカメラ（GoPro等）
+    "4025":  "action",      # アクションカメラ
+    "4028":  "compact",     # インスタントカメラ
+    "4031":  "other",       # パノラマカメラ
+    "4032":  "dslr",        # フィルム一眼レフ
+    "4033":  "compact",     # 使い捨てカメラ
+    "843":   "compact",     # コンパクトデジカメ
+    "846":   "lens",        # 交換レンズ
+    "1255":  "lens",        # 交換レンズ
+    "4078":  "lens",        # レンズマウントアダプター
+    "3671":  "lens",        # スマホ用レンズ
+    "8724":  "other",       # カメラ（その他）
+    "536":   "compact",     # デジタルカメラ
+    "980":   "compact",     # デジタルカメラ
+    "4101":  "other",       # ジンバル
+    "4103":  "other",       # ストロボ
+    "4113":  "other",       # 小型カメラ
+    "4114":  "other",       # バッテリー
+    "4115":  "other",       # 充電器
+    "4117":  "other",       # カメラバッグ
+    "4119":  "other",       # カメラポーチ
+    "4120":  "other",       # クリーニング用品
+    "4097":  "other",       # ストラップ
+    "4098":  "other",       # 三脚・雲台
+    "4076":  "other",       # レンズフード
+    "4083":  "other",       # レンズフィルター
+}
+
 SPREADSHEET_NAME = "仕入れマスター_統合版_v2_v8"
 BLOCKLIST_SHEET = "除外リスト"
 SENT_SHEET = "送信済みリスト"
@@ -207,9 +242,6 @@ async def fetch_mercari_items_async(keyword):
                 "item_condition_id": str(item.item_condition_id) if hasattr(item, "item_condition_id") and item.item_condition_id else "",
             })
         logger.info(f"メルカリ取得件数：{len(items)} 件")
-        # デバッグ：categoryId実値確認
-        for dbg in items[:20]:
-            logger.info(f"categoryId確認: {dbg['category_id']} / {dbg['title'][:20]}")
         return items
     except Exception as e:
         logger.error(f"メルカリ取得エラー: {e}")
@@ -293,6 +325,7 @@ def send_to_n8n(items):
                 "url": item["url"],
                 "sellerId": item["seller_id"],
                 "itemConditionId": item["item_condition_id"],
+                "category": CATEGORY_MAP.get(item["category_id"], "other"),
             }
             for item in items
         ]
