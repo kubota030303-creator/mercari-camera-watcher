@@ -124,6 +124,16 @@ SENT_SHEET = "送信済みリスト"
 MASTER_SHEET = "相場表_v2"          # ★ 相場表シート名
 SENT_RETENTION_HOURS = 24
 
+# 状態IDと状態名・仕入上限列のマッピング
+CONDITION_MAP = {
+    "1": ("ほぼ新品",   "max_buy_new"),
+    "2": ("非常に良い", "max_buy_very_good"),
+    "3": ("良い",       "max_buy_good"),
+    "4": ("可",         "max_buy_acceptable"),
+}
+# それ以外はジャンク → max_buy_acceptableを使用
+CONDITION_DEFAULT = ("ジャンク", "max_buy_acceptable")
+
 
 # ──────────────────────────────────────────
 # Google Sheets 認証
@@ -145,20 +155,28 @@ def get_gspread_client():
 # ──────────────────────────────────────────
 # 相場表 機種名リスト取得
 # ──────────────────────────────────────────
-def fetch_model_names(client):
+def fetch_master_sheet(client):
+    """相場表_v2からmodel_name_normalized・max_buy_*列を全件取得して辞書リストで返す"""
     try:
         sheet = client.open(SPREADSHEET_NAME).worksheet(MASTER_SHEET)
-        # model_name_normalized列（A列を想定。ヘッダー行スキップ）
-        col_values = sheet.col_values(12)  # L列：model_name_normalized
-        model_names = [
-            v.strip() for v in col_values[1:]
-            if v.strip() and len(v.strip()) >= 4  # 3文字以下はノイズ除外
-        ]
-        logger.info(f"相場表 機種名取得完了：{len(model_names)} 件")
-        return model_names
+        records = sheet.get_all_records()
+        logger.info(f"相場表 全件取得完了：{len(records)} 件")
+        return records
     except Exception as e:
-        logger.warning(f"相場表 機種名取得失敗（空リストで継続）: {e}")
+        logger.warning(f"相場表 取得失敗（空リストで継続）: {e}")
         return []
+
+
+def fetch_model_names(master_records):
+    """相場表レコードからmodel_name_normalizedを抽出してリストで返す（後方互換）"""
+    model_names = [
+        r.get("model_name_normalized", "").strip()
+        for r in master_records
+        if r.get("model_name_normalized", "").strip()
+        and len(r.get("model_name_normalized", "").strip()) >= 4
+    ]
+    logger.info(f"相場表 機種名取得完了：{len(model_names)} 件")
+    return model_names
 
 
 MAKER_NAMES = {
@@ -169,21 +187,56 @@ MAKER_NAMES = {
 }
 
 
-def extract_model_tokens(model_names):
-    """機種名から型番らしいトークンを抽出（4文字以上・英数字含む・メーカー名除外）"""
-    tokens = set()
-    for name in model_names:
+def extract_model_tokens(master_records):
+    """
+    相場表レコードから型番トークンを抽出し、
+    token → [record, ...] の辞書と token のsetを返す。
+    """
+    token_to_records = {}  # token(大文字) → レコードリスト
+    for record in master_records:
+        name = record.get("model_name_normalized", "").strip()
+        if not name:
+            continue
         words = name.split()
         for word in words:
             w = word.upper()
             if len(w) >= 4 and re.search(r'[A-Z0-9]', w) and w not in MAKER_NAMES:
-                tokens.add(w)
+                if w not in token_to_records:
+                    token_to_records[w] = []
+                token_to_records[w].append(record)
+    tokens = set(token_to_records.keys())
     logger.info(f"型番トークン抽出完了：{len(tokens)} 件")
-    return tokens
+    return token_to_records, tokens
+
+
+def find_matched_model(title, token_to_records, condition_id):
+    """
+    商品タイトルに型番トークンが含まれるか判定し、
+    マッチした機種名・状態名・max_priceを返す。
+    マッチしない場合は None を返す。
+    """
+    title_upper = title.upper()
+    condition_name, price_col = CONDITION_MAP.get(str(condition_id), CONDITION_DEFAULT)
+
+    for token, records in token_to_records.items():
+        if token in title_upper:
+            # トークンにマッチした最初のレコードのmax_priceを使用
+            record = records[0]
+            raw_price = record.get(price_col, "")
+            try:
+                max_price = int(str(raw_price).replace(",", "").strip()) if raw_price != "" else None
+            except (ValueError, TypeError):
+                max_price = None
+            return {
+                "matched_name": record.get("model_name_normalized", ""),
+                "condition": condition_name,
+                "max_price": max_price,
+            }
+    return None
 
 
 def is_model_matched(title, model_tokens):
-    """商品タイトルに型番トークンが含まれるか判定（大文字小文字無視）"""
+    """商品タイトルに型番トークンが含まれるか判定（後方互換用・単純boolean）"""
     title_upper = title.upper()
     return any(token in title_upper for token in model_tokens)
 
@@ -318,7 +371,7 @@ def fetch_mercari_items(keyword):
 # ──────────────────────────────────────────
 # 前段除外フィルタ
 # ──────────────────────────────────────────
-def apply_filters(items, blocked_seller_ids, already_sent, model_tokens):
+def apply_filters(items, blocked_seller_ids, already_sent, token_to_records, model_tokens):
     stats = {
         "total": len(items),
         "status_blocked": 0,
@@ -360,9 +413,21 @@ def apply_filters(items, blocked_seller_ids, already_sent, model_tokens):
             continue
 
         # Step 6: 相場表マッチング（機種名が相場表にない商品は除外）
-        if model_tokens and not is_model_matched(item["title"], model_tokens):
-            stats["model_blocked"] += 1
-            continue
+        if model_tokens:
+            match_result = find_matched_model(
+                item["title"], token_to_records, item["item_condition_id"]
+            )
+            if match_result is None:
+                stats["model_blocked"] += 1
+                continue
+            # マッチ結果をitemに付加
+            item["matched_name"] = match_result["matched_name"]
+            item["condition"]    = match_result["condition"]
+            item["max_price"]    = match_result["max_price"]
+        else:
+            item["matched_name"] = ""
+            item["condition"]    = ""
+            item["max_price"]    = None
 
         # Step 7: 重複除外
         if item["item_id"] in already_sent:
@@ -388,17 +453,23 @@ def send_to_n8n(items):
     payload = {
         "items": [
             {
-                "id": item["item_id"],
-                "name": item["title"],
-                "price": item["price"],
-                "url": item["url"],
-                "sellerId": item["seller_id"],
+                "id":             item["item_id"],
+                "name":           item["title"],
+                "price":          item["price"],
+                "url":            item["url"],
+                "sellerId":       item["seller_id"],
                 "itemConditionId": item["item_condition_id"],
-                "category": CATEGORY_MAP.get(item["category_id"], "other"),
+                "category":       CATEGORY_MAP.get(item["category_id"], "other"),
+                "matched_name":   item.get("matched_name", ""),
+                "max_price":      item.get("max_price", None),
+                "condition":      item.get("condition", ""),
             }
             for item in items
         ]
     }
+    # ★ 先頭1件をサンプルログ出力
+    if payload["items"]:
+        logger.info(f"payloadサンプル（1件目）: {json.dumps(payload['items'][0], ensure_ascii=False)}")
     try:
         resp = requests.post(webhook_url, json=payload, timeout=30)
         resp.raise_for_status()
@@ -423,8 +494,9 @@ def main():
 
     blocked_seller_ids = fetch_blocked_seller_ids(gc)
     already_sent = fetch_already_sent(gc)
-    model_names = fetch_model_names(gc)  # ★ 相場表 機種名リスト取得
-    model_tokens = extract_model_tokens(model_names)  # ★ 型番トークン抽出
+    master_records = fetch_master_sheet(gc)         # ★ 相場表 全件取得
+    model_names = fetch_model_names(master_records)  # 機種名リスト（ログ確認用）
+    token_to_records, model_tokens = extract_model_tokens(master_records)  # ★ 型番トークン抽出
 
     # ★ キーワードごとにループして全件取得・item_idで重複除去
     all_items_dict = {}  # item_id → item（重複除去用）
@@ -444,7 +516,7 @@ def main():
         logger.warning("取得件数0件。終了します。")
         return
 
-    passed, stats = apply_filters(all_items, blocked_seller_ids, already_sent, model_tokens)
+    passed, stats = apply_filters(all_items, blocked_seller_ids, already_sent, token_to_records, model_tokens)
 
     logger.info(f"取得件数　　　　：{stats['total']} 件")
     logger.info(f"販売中以外除外　：{stats['status_blocked']} 件")
