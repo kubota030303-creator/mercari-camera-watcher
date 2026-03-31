@@ -7,6 +7,7 @@ mercapiライブラリでメルカリ新着カメラ商品を取得し、
 import asyncio
 import os
 import json
+import re
 import time
 import logging
 import requests
@@ -160,10 +161,31 @@ def fetch_model_names(client):
         return []
 
 
-def is_model_matched(title, model_names):
-    """商品タイトルに相場表の機種名が部分一致するか判定（大文字小文字無視）"""
+MAKER_NAMES = {
+    'NIKON', 'CANON', 'SONY', 'FUJIFILM', 'PANASONIC',
+    'OLYMPUS', 'PENTAX', 'SIGMA', 'TAMRON', 'TOKINA',
+    'LEICA', 'HASSELBLAD', 'GOPRO', 'DJI', 'INSTA360',
+    'RICOH', 'CASIO', 'MINOLTA', 'KYOCERA', 'MAMIYA',
+}
+
+
+def extract_model_tokens(model_names):
+    """機種名から型番らしいトークンを抽出（4文字以上・英数字含む・メーカー名除外）"""
+    tokens = set()
+    for name in model_names:
+        words = name.split()
+        for word in words:
+            w = word.upper()
+            if len(w) >= 4 and re.search(r'[A-Z0-9]', w) and w not in MAKER_NAMES:
+                tokens.add(w)
+    logger.info(f"型番トークン抽出完了：{len(tokens)} 件")
+    return tokens
+
+
+def is_model_matched(title, model_tokens):
+    """商品タイトルに型番トークンが含まれるか判定（大文字小文字無視）"""
     title_upper = title.upper()
-    return any(name.upper() in title_upper for name in model_names)
+    return any(token in title_upper for token in model_tokens)
 
 
 # ──────────────────────────────────────────
@@ -296,7 +318,7 @@ def fetch_mercari_items(keyword):
 # ──────────────────────────────────────────
 # 前段除外フィルタ
 # ──────────────────────────────────────────
-def apply_filters(items, blocked_seller_ids, already_sent, model_names):
+def apply_filters(items, blocked_seller_ids, already_sent, model_tokens):
     stats = {
         "total": len(items),
         "status_blocked": 0,
@@ -338,7 +360,7 @@ def apply_filters(items, blocked_seller_ids, already_sent, model_names):
             continue
 
         # Step 6: 相場表マッチング（機種名が相場表にない商品は除外）
-        if model_names and not is_model_matched(item["title"], model_names):
+        if model_tokens and not is_model_matched(item["title"], model_tokens):
             stats["model_blocked"] += 1
             continue
 
@@ -402,6 +424,7 @@ def main():
     blocked_seller_ids = fetch_blocked_seller_ids(gc)
     already_sent = fetch_already_sent(gc)
     model_names = fetch_model_names(gc)  # ★ 相場表 機種名リスト取得
+    model_tokens = extract_model_tokens(model_names)  # ★ 型番トークン抽出
 
     # ★ キーワードごとにループして全件取得・item_idで重複除去
     all_items_dict = {}  # item_id → item（重複除去用）
@@ -421,7 +444,7 @@ def main():
         logger.warning("取得件数0件。終了します。")
         return
 
-    passed, stats = apply_filters(all_items, blocked_seller_ids, already_sent, model_names)
+    passed, stats = apply_filters(all_items, blocked_seller_ids, already_sent, model_tokens)
 
     logger.info(f"取得件数　　　　：{stats['total']} 件")
     logger.info(f"販売中以外除外　：{stats['status_blocked']} 件")
