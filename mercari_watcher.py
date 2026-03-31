@@ -120,6 +120,7 @@ CATEGORY_MAP = {
 SPREADSHEET_NAME = "仕入れマスター_統合版_v2_v8"
 BLOCKLIST_SHEET = "除外リスト"
 SENT_SHEET = "送信済みリスト"
+MASTER_SHEET = "相場表_v2"          # ★ 相場表シート名
 SENT_RETENTION_HOURS = 24
 
 
@@ -137,6 +138,32 @@ def get_gspread_client():
     ]
     creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
     return gspread.authorize(creds)
+
+
+
+# ──────────────────────────────────────────
+# 相場表 機種名リスト取得
+# ──────────────────────────────────────────
+def fetch_model_names(client):
+    try:
+        sheet = client.open(SPREADSHEET_NAME).worksheet(MASTER_SHEET)
+        # model_name_normalized列（A列を想定。ヘッダー行スキップ）
+        col_values = sheet.col_values(1)
+        model_names = [
+            v.strip() for v in col_values[1:]
+            if v.strip() and len(v.strip()) >= 4  # 3文字以下はノイズ除外
+        ]
+        logger.info(f"相場表 機種名取得完了：{len(model_names)} 件")
+        return model_names
+    except Exception as e:
+        logger.warning(f"相場表 機種名取得失敗（空リストで継続）: {e}")
+        return []
+
+
+def is_model_matched(title, model_names):
+    """商品タイトルに相場表の機種名が部分一致するか判定（大文字小文字無視）"""
+    title_upper = title.upper()
+    return any(name.upper() in title_upper for name in model_names)
 
 
 # ──────────────────────────────────────────
@@ -269,7 +296,7 @@ def fetch_mercari_items(keyword):
 # ──────────────────────────────────────────
 # 前段除外フィルタ
 # ──────────────────────────────────────────
-def apply_filters(items, blocked_seller_ids, already_sent):
+def apply_filters(items, blocked_seller_ids, already_sent, model_names):
     stats = {
         "total": len(items),
         "status_blocked": 0,
@@ -277,6 +304,7 @@ def apply_filters(items, blocked_seller_ids, already_sent):
         "price_blocked": 0,
         "ng_keyword_blocked": 0,
         "category_blocked": 0,
+        "model_blocked": 0,   # ★ 相場表マッチング除外
         "duplicate_blocked": 0,
         "passed": 0,
     }
@@ -309,7 +337,12 @@ def apply_filters(items, blocked_seller_ids, already_sent):
             stats["category_blocked"] += 1
             continue
 
-        # Step 6: 重複除外
+        # Step 6: 相場表マッチング（機種名が相場表にない商品は除外）
+        if model_names and not is_model_matched(item["title"], model_names):
+            stats["model_blocked"] += 1
+            continue
+
+        # Step 7: 重複除外
         if item["item_id"] in already_sent:
             stats["duplicate_blocked"] += 1
             continue
@@ -368,6 +401,7 @@ def main():
 
     blocked_seller_ids = fetch_blocked_seller_ids(gc)
     already_sent = fetch_already_sent(gc)
+    model_names = fetch_model_names(gc)  # ★ 相場表 機種名リスト取得
 
     # ★ キーワードごとにループして全件取得・item_idで重複除去
     all_items_dict = {}  # item_id → item（重複除去用）
@@ -387,7 +421,7 @@ def main():
         logger.warning("取得件数0件。終了します。")
         return
 
-    passed, stats = apply_filters(all_items, blocked_seller_ids, already_sent)
+    passed, stats = apply_filters(all_items, blocked_seller_ids, already_sent, model_names)
 
     logger.info(f"取得件数　　　　：{stats['total']} 件")
     logger.info(f"販売中以外除外　：{stats['status_blocked']} 件")
@@ -395,6 +429,7 @@ def main():
     logger.info(f"価格除外　　　　：{stats['price_blocked']} 件")
     logger.info(f"NGキーワード除外：{stats['ng_keyword_blocked']} 件")
     logger.info(f"カテゴリ除外　　：{stats['category_blocked']} 件")
+    logger.info(f"相場表外除外　　：{stats['model_blocked']} 件")
     logger.info(f"重複除外　　　　：{stats['duplicate_blocked']} 件")
     logger.info(f"pass件数　　　　：{stats['passed']} 件")
 
