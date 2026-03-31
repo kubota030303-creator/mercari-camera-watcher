@@ -148,7 +148,7 @@ def fetch_model_names(client):
     try:
         sheet = client.open(SPREADSHEET_NAME).worksheet(MASTER_SHEET)
         # model_name_normalized列（A列を想定。ヘッダー行スキップ）
-        col_values = sheet.col_values(1)
+        col_values = sheet.col_values(12)  # L列：model_name_normalized
         model_names = [
             v.strip() for v in col_values[1:]
             if v.strip() and len(v.strip()) >= 4  # 3文字以下はノイズ除外
