@@ -28,7 +28,20 @@ logger = logging.getLogger(__name__)
 # ──────────────────────────────────────────
 # 定数
 # ──────────────────────────────────────────
-KEYWORD = "一眼レフカメラ"
+# ★ KEYWORD → KWORDSリストに変更（11種）
+KEYWORDS = [
+    "一眼レフカメラ",
+    "単焦点レンズ",
+    "交換レンズ",
+    "ミラーレスカメラ",
+    "α7",
+    "EOS R",
+    "Nikon Z",
+    "ズームレンズ",
+    "FUJIFILM X",
+    "GH5",
+    "OM-1",
+]
 
 CAMERA_CATEGORY_IDS = {
     # ── カメラ本体 ──
@@ -241,10 +254,11 @@ async def fetch_mercari_items_async(keyword):
                 "status": str(item.status) if item.status else "",
                 "item_condition_id": str(item.item_condition_id) if hasattr(item, "item_condition_id") and item.item_condition_id else "",
             })
-        logger.info(f"メルカリ取得件数：{len(items)} 件")
+        # ★ キーワードごとの取得件数をログ出力
+        logger.info(f"{keyword}：{len(items)} 件取得")
         return items
     except Exception as e:
-        logger.error(f"メルカリ取得エラー: {e}")
+        logger.error(f"メルカリ取得エラー（キーワード：{keyword}）: {e}")
         return []
 
 
@@ -355,12 +369,25 @@ def main():
     blocked_seller_ids = fetch_blocked_seller_ids(gc)
     already_sent = fetch_already_sent(gc)
 
-    items = fetch_mercari_items(KEYWORD)
-    if not items:
+    # ★ キーワードごとにループして全件取得・item_idで重複除去
+    all_items_dict = {}  # item_id → item（重複除去用）
+    for keyword in KEYWORDS:
+        items = fetch_mercari_items(keyword)
+        for item in items:
+            item_id = item["item_id"]
+            if item_id and item_id not in all_items_dict:
+                all_items_dict[item_id] = item
+        # ★ キーワード間に1秒のsleep（API負荷軽減）
+        time.sleep(1)
+
+    all_items = list(all_items_dict.values())
+    logger.info(f"全キーワード合計（重複除去後）：{len(all_items)} 件")
+
+    if not all_items:
         logger.warning("取得件数0件。終了します。")
         return
 
-    passed, stats = apply_filters(items, blocked_seller_ids, already_sent)
+    passed, stats = apply_filters(all_items, blocked_seller_ids, already_sent)
 
     logger.info(f"取得件数　　　　：{stats['total']} 件")
     logger.info(f"販売中以外除外　：{stats['status_blocked']} 件")
