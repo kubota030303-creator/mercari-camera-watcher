@@ -372,6 +372,7 @@ async def fetch_mercari_items_async(keyword):
                 "category_id": str(item.category_id) if hasattr(item, "category_id") and item.category_id else "",
                 "status": str(item.status) if item.status else "",
                 "item_condition_id": str(item.item_condition_id) if hasattr(item, "item_condition_id") and item.item_condition_id else "",
+                "item_type": str(item.item_type) if hasattr(item, "item_type") and item.item_type else "",
             })
         # ★ キーワードごとの取得件数をログ出力
         logger.info(f"{keyword}：{len(items)} 件取得")
@@ -392,6 +393,7 @@ def apply_filters(items, blocked_seller_ids, already_sent, token_to_records, mod
     stats = {
         "total": len(items),
         "status_blocked": 0,
+        "auction_blocked": 0,  # ★ オークション除外
         "seller_blocked": 0,
         "price_blocked": 0,
         "ng_keyword_blocked": 0,
@@ -404,6 +406,17 @@ def apply_filters(items, blocked_seller_ids, already_sent, token_to_records, mod
 
     passed = []
     for item in items:
+        # Step 0: オークション商品を除外
+        # 方法①：item_typeフィールドで判定
+        item_type = item.get("item_type", "")
+        if "AUCTION" in item_type.upper():
+            stats["auction_blocked"] += 1
+            continue
+        # 方法②：item_idが"a"で始まる場合もオークション
+        if item.get("item_id", "").startswith("a"):
+            stats["auction_blocked"] += 1
+            continue
+
         # Step 1: 販売中以外を除外
         status_str = str(item["status"])
         if "ON_SALE" not in status_str and status_str != "1":
@@ -547,6 +560,7 @@ def main():
     passed, stats = apply_filters(all_items, blocked_seller_ids, already_sent, token_to_records, model_tokens)
 
     logger.info(f"取得件数　　　　：{stats['total']} 件")
+    logger.info(f"オークション除外：{stats['auction_blocked']} 件")
     logger.info(f"販売中以外除外　：{stats['status_blocked']} 件")
     logger.info(f"sellerId除外　　：{stats['seller_blocked']} 件")
     logger.info(f"価格除外　　　　：{stats['price_blocked']} 件")
