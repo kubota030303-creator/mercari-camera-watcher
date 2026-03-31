@@ -209,17 +209,34 @@ def extract_model_tokens(master_records):
     return token_to_records, tokens
 
 
+def _word_boundary_match(token, title_upper):
+    """
+    単語境界チェック：トークンの前後が英数字でないことを確認する。
+    例：「Z7」が「Z7II」にマッチしないようにするため。
+    """
+    idx = title_upper.find(token)
+    while idx != -1:
+        before_ok = (idx == 0) or (not title_upper[idx - 1].isalnum())
+        after_idx = idx + len(token)
+        after_ok  = (after_idx >= len(title_upper)) or (not title_upper[after_idx].isalnum())
+        if before_ok and after_ok:
+            return True
+        idx = title_upper.find(token, idx + 1)
+    return False
+
+
 def find_matched_model(title, token_to_records, condition_id):
     """
     商品タイトルに型番トークンが含まれるか判定し、
     マッチした機種名・状態名・max_priceを返す。
+    単語境界チェックにより誤マッチを防止。
     マッチしない場合は None を返す。
     """
     title_upper = title.upper()
     condition_name, price_col = CONDITION_MAP.get(str(condition_id), CONDITION_DEFAULT)
 
     for token, records in token_to_records.items():
-        if token in title_upper:
+        if _word_boundary_match(token, title_upper):
             # トークンにマッチした最初のレコードのmax_priceを使用
             record = records[0]
             raw_price = record.get(price_col, "")
@@ -380,6 +397,7 @@ def apply_filters(items, blocked_seller_ids, already_sent, token_to_records, mod
         "ng_keyword_blocked": 0,
         "category_blocked": 0,
         "model_blocked": 0,   # ★ 相場表マッチング除外
+        "profit_blocked": 0,  # ★ 実質利益不足除外
         "duplicate_blocked": 0,
         "passed": 0,
     }
@@ -429,6 +447,14 @@ def apply_filters(items, blocked_seller_ids, already_sent, token_to_records, mod
             item["condition"]    = ""
             item["max_price"]    = None
 
+        # Step 6.5: 実質利益フィルタ
+        # 計算式：(max_price - price - 1000 - 600) × 0.9
+        if item.get("max_price") is not None:
+            real_profit = (item["max_price"] - item["price"] - 1000 - 600) * 0.9
+            if real_profit < 5000:
+                stats["profit_blocked"] += 1
+                continue
+
         # Step 7: 重複除外
         if item["item_id"] in already_sent:
             stats["duplicate_blocked"] += 1
@@ -463,6 +489,8 @@ def send_to_n8n(items):
                 "matched_name":   item.get("matched_name", ""),
                 "max_price":      item.get("max_price", None),
                 "condition":      item.get("condition", ""),
+                "real_profit":    int((item["max_price"] - item["price"] - 1000 - 600) * 0.9)
+                                  if item.get("max_price") is not None else None,
             }
             for item in items
         ]
@@ -525,6 +553,7 @@ def main():
     logger.info(f"NGキーワード除外：{stats['ng_keyword_blocked']} 件")
     logger.info(f"カテゴリ除外　　：{stats['category_blocked']} 件")
     logger.info(f"相場表外除外　　：{stats['model_blocked']} 件")
+    logger.info(f"実質利益不足除外：{stats['profit_blocked']} 件")
     logger.info(f"重複除外　　　　：{stats['duplicate_blocked']} 件")
     logger.info(f"pass件数　　　　：{stats['passed']} 件")
 
