@@ -121,7 +121,8 @@ CATEGORY_MAP = {
 SPREADSHEET_NAME = "仕入れマスター_統合版_v2_v8"
 BLOCKLIST_SHEET = "除外リスト"
 SENT_SHEET = "送信済みリスト"
-SENT_RETENTION_HOURS = 24
+SENT_RETENTION_HOURS = 72   # ★ 24h→72hに延長（重複除外強化）
+MAX_SEND_COUNT = 50          # ★ 1回の送信上限（n8nレート制限対策）
 
 
 
@@ -423,10 +424,14 @@ def main():
         logger.info("通知対象なし。終了します。")
         return
 
-    sent_count = send_to_n8n(passed)
+    # ★ 送信上限でスライス
+    to_send = passed[:MAX_SEND_COUNT]
+    if len(passed) > MAX_SEND_COUNT:
+        logger.info(f"送信上限により {len(passed)} 件→{MAX_SEND_COUNT} 件に絞り込み")
+    sent_count = send_to_n8n(to_send)
     logger.info(f"n8n送信　　　　：{sent_count} 件")
 
-    sent_ids = [item["item_id"] for item in passed[:sent_count]]
+    sent_ids = [item["item_id"] for item in to_send[:sent_count]]
     record_sent_items(gc, sent_ids)
 
     logger.info("===== Mercari Watcher 完了 =====")
