@@ -1,0 +1,20 @@
+name: auction-watcher
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 0 * * *'       # 09:00 JST
+    - cron: '30 9 * * *'      # 18:30 JST
+
+jobs:
+  auction:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install mercapi gspread google-auth requests tzdata
+      - run: python auction_watcher.py
+        env:
+          GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
