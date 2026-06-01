@@ -3,8 +3,10 @@ name: auction-watcher
 on:
   workflow_dispatch:
   schedule:
-    - cron: '5 20 * * *'      # 05:05 JST（朝）
-    - cron: '5 8 * * *'       # 17:05 JST（夕方）
+    - cron: '5 19 * * *'      # 04:05 JST
+    - cron: '5 1 * * *'       # 10:05 JST
+    - cron: '5 6 * * *'       # 15:05 JST
+    - cron: '5 8 * * *'       # 17:05 JST
 
 jobs:
   auction:
