@@ -73,6 +73,16 @@ def fetch_raw_items(auchours: int, max_pages: int = MAX_PAGES) -> list[dict]:
     return all_items
 
 
+def _parse_rating(s):
+    """goodRating '99.9%' → 0.999（float）。取れなければ None。"""
+    if not s:
+        return None
+    try:
+        return round(float(str(s).strip().rstrip("%")) / 100, 4)
+    except ValueError:
+        return None
+
+
 def parse_items(raw: list[dict], cutoff: datetime) -> list[dict]:
     """入札あり かつ cutoff までに終了 の商品を、終了が早い順で返す。"""
     out = []
@@ -82,6 +92,7 @@ def parse_items(raw: list[dict], cutoff: datetime) -> list[dict]:
         end = datetime.fromisoformat(it["endTime"]).astimezone(JST)
         if end > cutoff:
             continue
+        seller = it.get("seller") or {}
         out.append({
             "end_jst": end,
             "is_peak": end.hour >= PEAK_HOUR,   # 21時以降＝激戦帯
@@ -89,6 +100,9 @@ def parse_items(raw: list[dict], cutoff: datetime) -> list[dict]:
             "price": int(it.get("price", 0) or 0),
             "buynow": it.get("buyNowPrice"),
             "condition": it.get("itemCondition", ""),
+            "rating": _parse_rating(seller.get("goodRating")),  # 良い評価率(0-1)
+            "is_store": bool(seller.get("isStore")),            # ストア出品か
+            "seller_uid": seller.get("userId", ""),             # 出品者固有ID(名前は非公開)
             "title": it.get("title", ""),
             "id": it["auctionId"],
             "url": f"https://page.auctions.yahoo.co.jp/jp/auction/{it['auctionId']}",
