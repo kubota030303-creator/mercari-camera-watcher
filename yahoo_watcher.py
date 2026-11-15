@@ -133,7 +133,7 @@ def _apply_formatting(ss, sheet, n_rows: int, n_offpeak: int):
     reqs.append({"addConditionalFormatRule": {"index": 4, "rule": {
         "ranges": [{"sheetId": sid, "startColumnIndex": 6, "endColumnIndex": 7, **body}],
         "booleanRule": {
-            "condition": {"type": "NUMBER_LESS_THAN",
+            "condition": {"type": "NUMBER_LESS",
                           "values": [{"userEnteredValue": str(RATING_BAD)}]},
             "format": {"backgroundColor": {"red": 0.96, "green": 0.78, "blue": 0.78}}}}}})
     # 出品者タグ(I,col8): 同一出品者(複数出品)=黄で強調
