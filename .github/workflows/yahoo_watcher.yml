@@ -14,7 +14,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - run: pip install requests gspread google-auth tzdata
+      - run: pip install requests gspread google-auth tzdata mercapi
       - run: python yahoo_watcher.py
         env:
           GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
