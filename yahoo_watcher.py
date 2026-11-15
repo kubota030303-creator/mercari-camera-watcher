@@ -11,6 +11,7 @@ GitHub Actions で1日数回スケジュール実行する想定。
 """
 
 import logging
+from collections import Counter
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -29,11 +30,14 @@ logger = logging.getLogger(__name__)
 JST = ZoneInfo("Asia/Tokyo")
 YAHOO_SHEET = "ヤフオク終了間近"
 
-# 列: 終了 / 残り / 入札 / 現在価格 / 即決 / 状態 / 商品(リンク)
-HEADER = ["終了", "残り", "入札", "現在価格", "即決", "状態", "商品名（クリックで開く）"]
+# 列: 終了/残り/入札/現在/即決/状態/評価/種別/出品者/商品(リンク)
+HEADER = ["終了", "残り", "入札", "現在価格", "即決", "状態",
+          "評価", "種別", "出品者", "商品名（クリックで開く）"]
 
-LOW_BID = 3      # これ以下＝狙い目(緑)
-HIGH_BID = 20    # これ以上＝激戦(赤)
+LOW_BID = 3        # これ以下＝狙い目(緑)
+HIGH_BID = 20      # これ以上＝激戦(赤)
+RATING_GOOD = 0.99  # これ以上＝優良(緑)
+RATING_BAD = 0.95   # これ未満＝要注意(赤)
 
 COND_MAP = {
     "NEW": "新品", "USED10": "未使用に近い", "USED20": "目立った傷なし",
@@ -89,8 +93,8 @@ def _apply_formatting(ss, sheet, n_rows: int, n_offpeak: int):
             "foregroundColor": {"red": 1, "green": 1, "blue": 1}, "bold": True}}},
         "fields": "userEnteredFormat.textFormat"}})
 
-    # 列幅（0:終了 1:残り 2:入札 3:現在 4:即決 5:状態 6:商品）
-    widths = [70, 55, 45, 85, 85, 95, 520]
+    # 列幅（0:終了 1:残 2:入札 3:現在 4:即決 5:状態 6:評価 7:種別 8:出品者 9:商品）
+    widths = [60, 50, 42, 82, 82, 90, 56, 48, 56, 440]
     for i, w in enumerate(widths):
         reqs.append({"updateDimensionProperties": {
             "range": {"sheetId": sid, "dimension": "COLUMNS",
@@ -119,6 +123,25 @@ def _apply_formatting(ss, sheet, n_rows: int, n_offpeak: int):
         "booleanRule": {
             "condition": {"type": "NOT_BLANK"},
             "format": {"backgroundColor": {"red": 0.80, "green": 0.89, "blue": 0.97}}}}}})
+    # 評価(G,col6): 優良=緑 / 要注意=赤
+    reqs.append({"addConditionalFormatRule": {"index": 3, "rule": {
+        "ranges": [{"sheetId": sid, "startColumnIndex": 6, "endColumnIndex": 7, **body}],
+        "booleanRule": {
+            "condition": {"type": "NUMBER_GREATER_THAN_EQ",
+                          "values": [{"userEnteredValue": str(RATING_GOOD)}]},
+            "format": {"backgroundColor": {"red": 0.72, "green": 0.88, "blue": 0.72}}}}}})
+    reqs.append({"addConditionalFormatRule": {"index": 4, "rule": {
+        "ranges": [{"sheetId": sid, "startColumnIndex": 6, "endColumnIndex": 7, **body}],
+        "booleanRule": {
+            "condition": {"type": "NUMBER_LESS_THAN",
+                          "values": [{"userEnteredValue": str(RATING_BAD)}]},
+            "format": {"backgroundColor": {"red": 0.96, "green": 0.78, "blue": 0.78}}}}}})
+    # 出品者タグ(I,col8): 同一出品者(複数出品)=黄で強調
+    reqs.append({"addConditionalFormatRule": {"index": 5, "rule": {
+        "ranges": [{"sheetId": sid, "startColumnIndex": 8, "endColumnIndex": 9, **body}],
+        "booleanRule": {
+            "condition": {"type": "NOT_BLANK"},
+            "format": {"backgroundColor": {"red": 1.0, "green": 0.95, "blue": 0.70}}}}}})
 
     # 価格列（現在=D, 即決=E）を¥表示
     reqs.append({"repeatCell": {
@@ -126,6 +149,13 @@ def _apply_formatting(ss, sheet, n_rows: int, n_offpeak: int):
                   "startColumnIndex": 3, "endColumnIndex": 5},
         "cell": {"userEnteredFormat": {"numberFormat": {
             "type": "NUMBER", "pattern": "¥#,##0"}}},
+        "fields": "userEnteredFormat.numberFormat"}})
+    # 評価列(G)を％表示
+    reqs.append({"repeatCell": {
+        "range": {"sheetId": sid, "startRowIndex": 1, "endRowIndex": last,
+                  "startColumnIndex": 6, "endColumnIndex": 7},
+        "cell": {"userEnteredFormat": {"numberFormat": {
+            "type": "NUMBER", "pattern": "0.0%"}}},
         "fields": "userEnteredFormat.numberFormat"}})
 
     # 終了列(A)を時間帯で帯色分け：上=21時前(狙い目/薄緑)、下=21時以降(激戦/薄赤)
@@ -157,10 +187,22 @@ def write_to_sheet(client, rows: list[dict]):
         sheet = ss.add_worksheet(title=YAHOO_SHEET, rows=1200, cols=len(HEADER))
         logger.info(f"シート「{YAHOO_SHEET}」を新規作成")
 
+    # 同一出品者の判定：一覧内で2件以上出している出品者にグループ番号を付ける
+    uid_counts = Counter(r["seller_uid"] for r in rows if r["seller_uid"])
+    group_label, seq = {}, 0
+    for r in rows:
+        uid = r["seller_uid"]
+        if uid and uid_counts[uid] >= 2 and uid not in group_label:
+            seq += 1
+            group_label[uid] = f"S{seq}"
+
     now = datetime.now(JST)
     values = [HEADER]
     for r in rows:
         link = f'=HYPERLINK("{r["url"]}","{_esc(r["title"])}")'
+        uid = r["seller_uid"]
+        seller_tag = (f"{group_label[uid]}×{uid_counts[uid]}"
+                      if uid in group_label else "")
         values.append([
             r["end_jst"].strftime("%H:%M"),
             _remaining(r["end_jst"], now),
@@ -168,6 +210,9 @@ def write_to_sheet(client, rows: list[dict]):
             r["price"],
             r["buynow"] if r["buynow"] else "",
             COND_MAP.get(r["condition"], r["condition"]),
+            r["rating"] if r["rating"] is not None else "",
+            "ストア" if r["is_store"] else "個人",
+            seller_tag,
             link,
         ])
 
