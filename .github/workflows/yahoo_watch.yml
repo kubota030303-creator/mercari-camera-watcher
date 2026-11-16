@@ -22,4 +22,4 @@ jobs:
           GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
           YAHOO_CATEGORY_ID: '23140'
           YAHOO_SHEET_NAME: '時計終了間近'
-          YAHOO_MIN_PRICE: '50000'
+          YAHOO_MAX_PRICE: '50000'
