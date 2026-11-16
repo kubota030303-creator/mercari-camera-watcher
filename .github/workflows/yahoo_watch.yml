@@ -1,0 +1,25 @@
+name: yahoo-watch
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '7 19 * * *'    # 04:07 JST
+    - cron: '7 1 * * *'     # 10:07 JST
+    - cron: '7 6 * * *'     # 15:07 JST
+    - cron: '7 8 * * *'     # 17:07 JST
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install requests gspread google-auth tzdata mercapi
+      - run: python yahoo_watcher.py
+        env:
+          GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
+          YAHOO_CATEGORY_ID: '23140'
+          YAHOO_SHEET_NAME: '時計終了間近'
+          YAHOO_MIN_PRICE: '50000'
