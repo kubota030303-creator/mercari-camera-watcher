@@ -42,11 +42,14 @@ def _cutoff(now: datetime) -> datetime:
     return now.replace(hour=23, minute=59, second=59, microsecond=0)
 
 
-def _build_url(begin: int, auchours: int) -> str:
+def _build_url(begin: int, auchours: int, category_id: int, min_price: int = 0) -> str:
     # fixed=0: オークションのみ / mode=3: 入札多い順 / auchours: 終了までの時間
-    return (f"https://auctions.yahoo.co.jp/category/list/{CATEGORY_ID}"
-            f"?fixed=0&is_postage_mode=1&n={PAGE_SIZE}&b={begin}"
-            f"&select=3&mode=3&auchours={auchours}")
+    url = (f"https://auctions.yahoo.co.jp/category/list/{category_id}"
+           f"?fixed=0&is_postage_mode=1&n={PAGE_SIZE}&b={begin}"
+           f"&select=3&mode=3&auchours={auchours}")
+    if min_price > 0:
+        url += f"&aucminPrice={min_price}"   # 現在価格の下限（取得量も削減）
+    return url
 
 
 def _extract_items(html: str) -> list[dict]:
@@ -58,11 +61,13 @@ def _extract_items(html: str) -> list[dict]:
             ["search"]["items"]["listing"]["items"])
 
 
-def fetch_raw_items(auchours: int, max_pages: int = MAX_PAGES) -> list[dict]:
+def fetch_raw_items(auchours: int, category_id: int, min_price: int = 0,
+                    max_pages: int = MAX_PAGES) -> list[dict]:
     all_items: list[dict] = []
     for page in range(max_pages):
         begin = page * PAGE_SIZE + 1
-        resp = requests.get(_build_url(begin, auchours), headers=HEADERS, timeout=30)
+        resp = requests.get(_build_url(begin, auchours, category_id, min_price),
+                            headers=HEADERS, timeout=30)
         resp.raise_for_status()
         batch = _extract_items(resp.text)
         all_items.extend(batch)
@@ -83,11 +88,14 @@ def _parse_rating(s):
         return None
 
 
-def parse_items(raw: list[dict], cutoff: datetime) -> list[dict]:
-    """入札あり かつ cutoff までに終了 の商品を、終了が早い順で返す。"""
+def parse_items(raw: list[dict], cutoff: datetime, min_price: int = 0) -> list[dict]:
+    """入札あり かつ cutoff までに終了 の商品を、終了が早い順で返す。
+    min_price: 現在価格の下限（これ未満は除外）。"""
     out = []
     for it in raw:
         if int(it.get("bidCount", 0) or 0) < 1:
+            continue
+        if min_price > 0 and int(it.get("price", 0) or 0) < min_price:
             continue
         end = datetime.fromisoformat(it["endTime"]).astimezone(JST)
         if end > cutoff:
@@ -111,11 +119,13 @@ def parse_items(raw: list[dict], cutoff: datetime) -> list[dict]:
     return out
 
 
-def get_todays_auctions() -> list[dict]:
-    """今日中に終了 × 入札あり を全部取得（終了が早い順）。"""
+def get_todays_auctions(category_id: int = CATEGORY_ID, min_price: int = 0) -> list[dict]:
+    """今日中に終了 × 入札あり を全部取得（終了が早い順）。
+    category_idでカテゴリ切替、min_priceで現在価格の下限。"""
     now = datetime.now(JST)
     cutoff = _cutoff(now)
     hours = max(1, math.ceil((cutoff - now).total_seconds() / 3600))
-    logger.info(f"取得窓: 〜{cutoff.strftime('%H:%M')} (auchours={hours})")
-    raw = fetch_raw_items(hours)
-    return parse_items(raw, cutoff)
+    logger.info(f"取得窓: 〜{cutoff.strftime('%H:%M')} "
+                f"(auchours={hours}, category={category_id}, min_price={min_price})")
+    raw = fetch_raw_items(hours, category_id, min_price)
+    return parse_items(raw, cutoff, min_price)
