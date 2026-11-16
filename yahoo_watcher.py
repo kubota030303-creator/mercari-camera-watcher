@@ -1,12 +1,13 @@
 """
 yahoo_watcher.py
-ヤフオク「今日・21時までに終了 × 入札あり」のカメラ商品を取得し、
+ヤフオク「今日終了 × 入札あり」のカメラ商品を取得し、
 スプレッドシートのタブ「ヤフオク終了間近」に見やすく整形して上書き出力する。
 
-見やすさの工夫：
-- 商品名はクリックで商品ページに飛べるリンク（URL列を廃止）
-- 入札数が少ない＝狙い目を緑、多い＝激戦を赤で色分け
-- 即決ありを強調、ヘッダー固定、¥表示
+同一タブ内で利益計算まで完結：
+- 想定売値(黄色・入力)を入れると、現時点利益・入札上限がその行で自動計算
+- 計算の前提(手数料率・固定費・送料・目標利益率)は「利益計算」タブの設定を参照
+- 入力した想定売値は商品IDで突き合わせ、次の更新でも引き継ぐ(消えない)
+見やすさ：入札少=緑/多=赤、評価の優良/要注意、同一出品者タグ、終了帯の色分け。
 GitHub Actions で1日数回スケジュール実行する想定。
 """
 
@@ -29,20 +30,29 @@ logger = logging.getLogger(__name__)
 
 JST = ZoneInfo("Asia/Tokyo")
 YAHOO_SHEET = "ヤフオク終了間近"
+CALC_SHEET = "利益計算"   # 前提セル(B4手数料率/B5固定費/B6送料/B7目標利益率)の参照先
 
-# 列: 終了/残り/入札/現在/即決/状態/評価/種別/出品者/商品(リンク)
-HEADER = ["終了", "残り", "入札", "現在価格", "即決", "状態",
-          "評価", "種別", "出品者", "商品名（クリックで開く）"]
+# 列: 終了/残/入札/現在/即決/状態/評価/種別/出品者/想定売値/現時点利益/入札上限/商品/id
+HEADER = ["終了", "残り", "入札", "現在価格", "即決", "状態", "評価", "種別", "出品者",
+          "想定売値", "現時点利益", "入札上限", "商品名（クリックで開く）", "id"]
+COL_URIAGE = "想定売値"   # 引き継ぎ用の入力列名
+COL_ID = "id"            # 突き合わせキー列名
 
-LOW_BID = 3        # これ以下＝狙い目(緑)
-HIGH_BID = 20      # これ以上＝激戦(赤)
-RATING_GOOD = 0.99  # これ以上＝優良(緑)
-RATING_BAD = 0.95   # これ未満＝要注意(赤)
+LOW_BID = 3
+HIGH_BID = 20
+RATING_GOOD = 0.99
+RATING_BAD = 0.95
 
 COND_MAP = {
     "NEW": "新品", "USED10": "未使用に近い", "USED20": "目立った傷なし",
     "USED40": "やや傷汚れ", "USED60": "傷汚れあり", "USED80": "状態悪い",
 }
+
+# 計算式で使う前提セルへの参照（利益計算タブ）
+R_RATE = f"'{CALC_SHEET}'!$B$4"   # 手数料率
+R_FIX = f"'{CALC_SHEET}'!$B$5"    # 固定費
+R_SHIP = f"'{CALC_SHEET}'!$B$6"   # 仕入送料
+R_TARGET = f"'{CALC_SHEET}'!$B$7"  # 目標利益率
 
 
 def _remaining(end: datetime, now: datetime) -> str:
@@ -57,13 +67,38 @@ def _esc(s: str) -> str:
     return s.replace('"', '""')
 
 
-def _apply_formatting(ss, sheet, n_rows: int, n_offpeak: int):
-    """ヘッダー固定・色分け・¥表示などの見た目を適用（失敗してもデータは残す）。
-    n_offpeak: 21時前終了（狙い目帯）の件数。並びが終了昇順なので上から連続する。"""
-    sid = sheet.id
-    last = n_rows + 1  # ヘッダー込みの最終行
+def _load_saved_uriage(sheet) -> dict:
+    """既存シートから「商品ID → 想定売値」を読み、入力を引き継ぐための辞書を返す。"""
+    try:
+        existing = sheet.get_values(value_render_option="UNFORMATTED_VALUE")
+    except Exception as e:
+        logger.warning(f"既存想定売値の読み込みスキップ: {e}")
+        return {}
+    if not existing or len(existing) < 2:
+        return {}
+    hdr = existing[0]
+    try:
+        j = hdr.index(COL_URIAGE)
+        k = hdr.index(COL_ID)
+    except ValueError:
+        return {}
+    saved = {}
+    for row in existing[1:]:
+        if len(row) <= max(j, k):
+            continue
+        iid = str(row[k]).strip()
+        val = row[j]
+        if iid and val not in ("", None):
+            saved[iid] = val
+    logger.info(f"想定売値の引き継ぎ: {len(saved)} 件")
+    return saved
 
-    # 既存の条件付き書式を消してから貼り直す（毎回上書きのため蓄積防止）
+
+def _apply_formatting(ss, sheet, n_rows: int, n_offpeak: int):
+    """見た目を適用（失敗してもデータは残す）。"""
+    sid = sheet.id
+    last = n_rows + 1
+
     meta = ss.fetch_sheet_metadata()
     existing = 0
     for s in meta.get("sheets", []):
@@ -75,105 +110,84 @@ def _apply_formatting(ss, sheet, n_rows: int, n_offpeak: int):
     for _ in range(existing):
         reqs.append({"deleteConditionalFormatRule": {"sheetId": sid, "index": 0}})
 
-    # ヘッダー固定＋太字背景
+    # ヘッダー固定＋白文字濃色背景
     reqs.append({"updateSheetProperties": {
         "properties": {"sheetId": sid, "gridProperties": {"frozenRowCount": 1}},
         "fields": "gridProperties.frozenRowCount"}})
     reqs.append({"repeatCell": {
         "range": {"sheetId": sid, "startRowIndex": 0, "endRowIndex": 1},
         "cell": {"userEnteredFormat": {
-            "textFormat": {"bold": True},
+            "textFormat": {"bold": True, "foregroundColor": {"red": 1, "green": 1, "blue": 1}},
             "backgroundColor": {"red": 0.2, "green": 0.2, "blue": 0.2},
             "horizontalAlignment": "CENTER"}},
         "fields": "userEnteredFormat(textFormat,backgroundColor,horizontalAlignment)"}})
-    # ヘッダー文字を白に
-    reqs.append({"repeatCell": {
-        "range": {"sheetId": sid, "startRowIndex": 0, "endRowIndex": 1},
-        "cell": {"userEnteredFormat": {"textFormat": {
-            "foregroundColor": {"red": 1, "green": 1, "blue": 1}, "bold": True}}},
-        "fields": "userEnteredFormat.textFormat"}})
 
-    # 列幅（0:終了 1:残 2:入札 3:現在 4:即決 5:状態 6:評価 7:種別 8:出品者 9:商品）
-    widths = [60, 50, 42, 82, 82, 90, 56, 48, 56, 440]
+    # 列幅（0終了〜12商品）。13:idは非表示。
+    widths = [60, 50, 42, 82, 82, 90, 56, 48, 56, 84, 84, 84, 420]
     for i, w in enumerate(widths):
         reqs.append({"updateDimensionProperties": {
-            "range": {"sheetId": sid, "dimension": "COLUMNS",
-                      "startIndex": i, "endIndex": i + 1},
+            "range": {"sheetId": sid, "dimension": "COLUMNS", "startIndex": i, "endIndex": i + 1},
             "properties": {"pixelSize": w}, "fields": "pixelSize"}})
+    reqs.append({"updateDimensionProperties": {   # id列を隠す
+        "range": {"sheetId": sid, "dimension": "COLUMNS", "startIndex": 13, "endIndex": 14},
+        "properties": {"hiddenByUser": True}, "fields": "hiddenByUser"}})
 
     body = {"startRowIndex": 1, "endRowIndex": last}
 
-    # 入札: 少ない=緑(狙い目)
-    reqs.append({"addConditionalFormatRule": {"index": 0, "rule": {
-        "ranges": [{"sheetId": sid, "startColumnIndex": 2, "endColumnIndex": 3, **body}],
-        "booleanRule": {
-            "condition": {"type": "NUMBER_LESS_THAN_EQ",
-                          "values": [{"userEnteredValue": str(LOW_BID)}]},
-            "format": {"backgroundColor": {"red": 0.72, "green": 0.88, "blue": 0.72}}}}}})
-    # 入札: 多い=赤(激戦)
-    reqs.append({"addConditionalFormatRule": {"index": 1, "rule": {
-        "ranges": [{"sheetId": sid, "startColumnIndex": 2, "endColumnIndex": 3, **body}],
-        "booleanRule": {
-            "condition": {"type": "NUMBER_GREATER_THAN_EQ",
-                          "values": [{"userEnteredValue": str(HIGH_BID)}]},
-            "format": {"backgroundColor": {"red": 0.96, "green": 0.78, "blue": 0.78}}}}}})
-    # 即決: 値あり=青で強調
-    reqs.append({"addConditionalFormatRule": {"index": 2, "rule": {
-        "ranges": [{"sheetId": sid, "startColumnIndex": 4, "endColumnIndex": 5, **body}],
-        "booleanRule": {
-            "condition": {"type": "NOT_BLANK"},
-            "format": {"backgroundColor": {"red": 0.80, "green": 0.89, "blue": 0.97}}}}}})
-    # 評価(G,col6): 優良=緑 / 要注意=赤
-    reqs.append({"addConditionalFormatRule": {"index": 3, "rule": {
-        "ranges": [{"sheetId": sid, "startColumnIndex": 6, "endColumnIndex": 7, **body}],
-        "booleanRule": {
-            "condition": {"type": "NUMBER_GREATER_THAN_EQ",
-                          "values": [{"userEnteredValue": str(RATING_GOOD)}]},
-            "format": {"backgroundColor": {"red": 0.72, "green": 0.88, "blue": 0.72}}}}}})
-    reqs.append({"addConditionalFormatRule": {"index": 4, "rule": {
-        "ranges": [{"sheetId": sid, "startColumnIndex": 6, "endColumnIndex": 7, **body}],
-        "booleanRule": {
-            "condition": {"type": "NUMBER_LESS",
-                          "values": [{"userEnteredValue": str(RATING_BAD)}]},
-            "format": {"backgroundColor": {"red": 0.96, "green": 0.78, "blue": 0.78}}}}}})
-    # 出品者タグ(I,col8): 同一出品者(複数出品)=黄で強調
-    reqs.append({"addConditionalFormatRule": {"index": 5, "rule": {
-        "ranges": [{"sheetId": sid, "startColumnIndex": 8, "endColumnIndex": 9, **body}],
-        "booleanRule": {
-            "condition": {"type": "NOT_BLANK"},
-            "format": {"backgroundColor": {"red": 1.0, "green": 0.95, "blue": 0.70}}}}}})
+    def cf(idx, col0, col1, cond_type, val, rgb):
+        rule = {"ranges": [{"sheetId": sid, "startColumnIndex": col0,
+                            "endColumnIndex": col1, **body}],
+                "booleanRule": {"condition": {"type": cond_type},
+                                "format": {"backgroundColor": {
+                                    "red": rgb[0], "green": rgb[1], "blue": rgb[2]}}}}
+        if val is not None:
+            rule["booleanRule"]["condition"]["values"] = [{"userEnteredValue": val}]
+        reqs.append({"addConditionalFormatRule": {"index": idx, "rule": rule}})
 
-    # 価格列（現在=D, 即決=E）を¥表示
-    reqs.append({"repeatCell": {
-        "range": {"sheetId": sid, "startRowIndex": 1, "endRowIndex": last,
-                  "startColumnIndex": 3, "endColumnIndex": 5},
-        "cell": {"userEnteredFormat": {"numberFormat": {
-            "type": "NUMBER", "pattern": "¥#,##0"}}},
-        "fields": "userEnteredFormat.numberFormat"}})
-    # 評価列(G)を％表示
+    GREEN = (0.72, 0.88, 0.72)
+    RED = (0.96, 0.78, 0.78)
+    cf(0, 2, 3, "NUMBER_LESS_THAN_EQ", str(LOW_BID), GREEN)      # 入札 少=緑
+    cf(1, 2, 3, "NUMBER_GREATER_THAN_EQ", str(HIGH_BID), RED)   # 入札 多=赤
+    cf(2, 4, 5, "NOT_BLANK", None, (0.80, 0.89, 0.97))          # 即決 青
+    cf(3, 6, 7, "NUMBER_GREATER_THAN_EQ", str(RATING_GOOD), GREEN)  # 評価 優良
+    cf(4, 6, 7, "NUMBER_LESS", str(RATING_BAD), RED)               # 評価 要注意
+    cf(5, 8, 9, "NOT_BLANK", None, (1.0, 0.95, 0.70))          # 出品者タグ 黄
+    cf(6, 10, 11, "NUMBER_GREATER", "0", GREEN)                # 現時点利益 プラス=緑
+    cf(7, 10, 11, "NUMBER_LESS", "0", RED)                     # 現時点利益 マイナス=赤
+
+    # ¥表示：現在/即決(3-4) と 想定売値/現時点利益/入札上限(9-11)
+    for c0, c1 in ((3, 5), (9, 12)):
+        reqs.append({"repeatCell": {
+            "range": {"sheetId": sid, "startRowIndex": 1, "endRowIndex": last,
+                      "startColumnIndex": c0, "endColumnIndex": c1},
+            "cell": {"userEnteredFormat": {"numberFormat": {"type": "NUMBER", "pattern": "¥#,##0"}}},
+            "fields": "userEnteredFormat.numberFormat"}})
+    # 評価(6)を％
     reqs.append({"repeatCell": {
         "range": {"sheetId": sid, "startRowIndex": 1, "endRowIndex": last,
                   "startColumnIndex": 6, "endColumnIndex": 7},
-        "cell": {"userEnteredFormat": {"numberFormat": {
-            "type": "NUMBER", "pattern": "0.0%"}}},
+        "cell": {"userEnteredFormat": {"numberFormat": {"type": "NUMBER", "pattern": "0.0%"}}},
         "fields": "userEnteredFormat.numberFormat"}})
+    # 想定売値(9)を黄色＝入力欄
+    reqs.append({"repeatCell": {
+        "range": {"sheetId": sid, "startRowIndex": 1, "endRowIndex": last,
+                  "startColumnIndex": 9, "endColumnIndex": 10},
+        "cell": {"userEnteredFormat": {"backgroundColor": {"red": 1, "green": 0.97, "blue": 0.8}}},
+        "fields": "userEnteredFormat.backgroundColor"}})
 
-    # 終了列(A)を時間帯で帯色分け：上=21時前(狙い目/薄緑)、下=21時以降(激戦/薄赤)
-    # 終了昇順ソートなので狙い目帯は先頭から連続する。
-    split = 1 + n_offpeak  # 狙い目帯の最終行(0-based endRowIndex)
+    # 終了列(A)の時間帯帯色（終了昇順なので狙い目帯は先頭から連続）
+    split = 1 + n_offpeak
     if n_offpeak > 0:
         reqs.append({"repeatCell": {
             "range": {"sheetId": sid, "startRowIndex": 1, "endRowIndex": split,
                       "startColumnIndex": 0, "endColumnIndex": 1},
-            "cell": {"userEnteredFormat": {"backgroundColor": {
-                "red": 0.85, "green": 0.94, "blue": 0.85}}},
+            "cell": {"userEnteredFormat": {"backgroundColor": {"red": 0.85, "green": 0.94, "blue": 0.85}}},
             "fields": "userEnteredFormat.backgroundColor"}})
     if split < last:
         reqs.append({"repeatCell": {
             "range": {"sheetId": sid, "startRowIndex": split, "endRowIndex": last,
                       "startColumnIndex": 0, "endColumnIndex": 1},
-            "cell": {"userEnteredFormat": {"backgroundColor": {
-                "red": 0.98, "green": 0.87, "blue": 0.87}}},
+            "cell": {"userEnteredFormat": {"backgroundColor": {"red": 0.98, "green": 0.87, "blue": 0.87}}},
             "fields": "userEnteredFormat.backgroundColor"}})
 
     ss.batch_update({"requests": reqs})
@@ -187,7 +201,8 @@ def write_to_sheet(client, rows: list[dict]):
         sheet = ss.add_worksheet(title=YAHOO_SHEET, rows=1200, cols=len(HEADER))
         logger.info(f"シート「{YAHOO_SHEET}」を新規作成")
 
-    # 同一出品者の判定：一覧内で2件以上出している出品者にグループ番号を付ける
+    saved = _load_saved_uriage(sheet)   # 既存の想定売値を引き継ぐ
+
     uid_counts = Counter(r["seller_uid"] for r in rows if r["seller_uid"])
     group_label, seq = {}, 0
     for r in rows:
@@ -198,11 +213,18 @@ def write_to_sheet(client, rows: list[dict]):
 
     now = datetime.now(JST)
     values = [HEADER]
-    for r in rows:
+    for i, r in enumerate(rows):
+        row = i + 2  # シート上の行番号（1行目ヘッダー）
         link = f'=HYPERLINK("{r["url"]}","{_esc(r["title"])}")'
         uid = r["seller_uid"]
-        seller_tag = (f"{group_label[uid]}×{uid_counts[uid]}"
-                      if uid in group_label else "")
+        seller_tag = f"{group_label[uid]}×{uid_counts[uid]}" if uid in group_label else ""
+        uriage = saved.get(r["id"], "")   # 引き継いだ想定売値（無ければ空）
+        # 現時点利益 = 想定売値 - 販売手数料 - (現在価格 + 送料)
+        gaineki = (f'=IF($J{row}="","",$J{row}-($J{row}*{R_RATE}+{R_FIX})'
+                   f'-($D{row}+{R_SHIP}))')
+        # 入札上限 = 想定売値 - 販売手数料 - 目標利益 - 送料
+        jougen = (f'=IF($J{row}="","",$J{row}-($J{row}*{R_RATE}+{R_FIX})'
+                  f'-($J{row}*{R_TARGET})-{R_SHIP})')
         values.append([
             r["end_jst"].strftime("%H:%M"),
             _remaining(r["end_jst"], now),
@@ -213,7 +235,11 @@ def write_to_sheet(client, rows: list[dict]):
             r["rating"] if r["rating"] is not None else "",
             "ストア" if r["is_store"] else "個人",
             seller_tag,
+            uriage,
+            gaineki,
+            jougen,
             link,
+            r["id"],
         ])
 
     sheet.clear()
