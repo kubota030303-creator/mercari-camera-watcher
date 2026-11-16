@@ -201,7 +201,15 @@ def write_to_sheet(client, rows: list[dict]):
         sheet = ss.add_worksheet(title=YAHOO_SHEET, rows=1200, cols=len(HEADER))
         logger.info(f"シート「{YAHOO_SHEET}」を新規作成")
 
-    saved = _load_saved_uriage(sheet)   # 既存の想定売値を引き継ぐ
+    saved = _load_saved_uriage(sheet)   # 既存の想定売値を引き継ぐ（clear前に読む）
+
+    # グリッドの列数・行数を確保（列が足りないと書き込みがはみ出してエラーになる）
+    need_rows = len(rows) + 5
+    new_rows = max(sheet.row_count, need_rows)
+    new_cols = max(sheet.col_count, len(HEADER))
+    if new_rows != sheet.row_count or new_cols != sheet.col_count:
+        sheet.resize(rows=new_rows, cols=new_cols)
+        logger.info(f"グリッド拡張: {new_rows}行 x {new_cols}列")
 
     uid_counts = Counter(r["seller_uid"] for r in rows if r["seller_uid"])
     group_label, seq = {}, 0
