@@ -25,9 +25,10 @@ from yahoo_auction import get_todays_auctions, CATEGORY_ID as DEFAULT_CATEGORY
 # ファイル名はリネームされ得るので、不変のファイルIDで開く（利益計算タブと同一ファイル）
 SPREADSHEET_ID = "1MfOt13h8BAS0dcBAcROon8-nFpu3vQ25FTFZflZCYGc"
 
-# カテゴリ・出力タブ・価格下限は環境変数で切替（未指定ならカメラ＝従来どおり）
+# カテゴリ・出力タブ・価格下限/上限は環境変数で切替（未指定ならカメラ＝従来どおり）
 CATEGORY_ID = int(os.environ.get("YAHOO_CATEGORY_ID", DEFAULT_CATEGORY))
 MIN_PRICE = int(os.environ.get("YAHOO_MIN_PRICE", "0"))   # 現在価格の下限（0=制限なし）
+MAX_PRICE = int(os.environ.get("YAHOO_MAX_PRICE", "0"))   # 現在価格の上限（0=制限なし、以上を除外）
 
 logging.basicConfig(
     level=logging.INFO,
@@ -278,8 +279,9 @@ def main():
         logger.error(f"Google Sheets 認証失敗: {e}")
         return
 
-    logger.info(f"対象: category={CATEGORY_ID} / タブ「{YAHOO_SHEET}」/ 下限¥{MIN_PRICE:,}")
-    rows = get_todays_auctions(CATEGORY_ID, MIN_PRICE)
+    logger.info(f"対象: category={CATEGORY_ID} / タブ「{YAHOO_SHEET}」/ "
+                f"下限¥{MIN_PRICE:,} 上限¥{MAX_PRICE:,}")
+    rows = get_todays_auctions(CATEGORY_ID, MIN_PRICE, MAX_PRICE)
     logger.info(f"今日終了 × 入札あり：{len(rows)} 件")
     write_to_sheet(gc, rows)
     logger.info("===== Yahoo Watcher 完了 =====")
