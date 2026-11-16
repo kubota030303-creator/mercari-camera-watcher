@@ -11,6 +11,7 @@ yahoo_watcher.py
 GitHub Actions で1日数回スケジュール実行する想定。
 """
 
+import os
 import logging
 from collections import Counter
 from datetime import datetime
@@ -19,10 +20,14 @@ from zoneinfo import ZoneInfo
 import gspread
 
 from mercari_watcher import get_gspread_client
-from yahoo_auction import get_todays_auctions
+from yahoo_auction import get_todays_auctions, CATEGORY_ID as DEFAULT_CATEGORY
 
 # ファイル名はリネームされ得るので、不変のファイルIDで開く（利益計算タブと同一ファイル）
 SPREADSHEET_ID = "1MfOt13h8BAS0dcBAcROon8-nFpu3vQ25FTFZflZCYGc"
+
+# カテゴリ・出力タブ・価格下限は環境変数で切替（未指定ならカメラ＝従来どおり）
+CATEGORY_ID = int(os.environ.get("YAHOO_CATEGORY_ID", DEFAULT_CATEGORY))
+MIN_PRICE = int(os.environ.get("YAHOO_MIN_PRICE", "0"))   # 現在価格の下限（0=制限なし）
 
 logging.basicConfig(
     level=logging.INFO,
@@ -32,7 +37,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 JST = ZoneInfo("Asia/Tokyo")
-YAHOO_SHEET = "ヤフオク終了間近"
+YAHOO_SHEET = os.environ.get("YAHOO_SHEET_NAME", "ヤフオク終了間近")
 CALC_SHEET = "利益計算"   # 前提セル(B4手数料率/B5固定費/B6送料/B7目標利益率)の参照先
 
 # 列: 終了/残/入札/現在/即決/状態/評価/種別/出品者/想定売値/現時点利益/入札上限/商品/id
@@ -273,7 +278,8 @@ def main():
         logger.error(f"Google Sheets 認証失敗: {e}")
         return
 
-    rows = get_todays_auctions()
+    logger.info(f"対象: category={CATEGORY_ID} / タブ「{YAHOO_SHEET}」/ 下限¥{MIN_PRICE:,}")
+    rows = get_todays_auctions(CATEGORY_ID, MIN_PRICE)
     logger.info(f"今日終了 × 入札あり：{len(rows)} 件")
     write_to_sheet(gc, rows)
     logger.info("===== Yahoo Watcher 完了 =====")
