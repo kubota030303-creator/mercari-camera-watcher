@@ -1,14 +1,12 @@
 """
 yahoo_watcher.py
-ヤフオク「今日終了 × 入札あり」のカメラ商品を取得し、
-スプレッドシートのタブ「ヤフオク終了間近」に見やすく整形して上書き出力する。
-
-同一タブ内で利益計算まで完結：
-- 想定売値(黄色・入力)を入れると、現時点利益・入札上限がその行で自動計算
-- 計算の前提(手数料率・固定費・送料・目標利益率)は「利益計算」タブの設定を参照
-- 入力した想定売値は商品IDで突き合わせ、次の更新でも引き継ぐ(消えない)
-見やすさ：入札少=緑/多=赤、評価の優良/要注意、同一出品者タグ、終了帯の色分け。
-GitHub Actions で1日数回スケジュール実行する想定。
+ヤフオクのカテゴリ（複数可）の「今日終了 × 入札あり」を取得し、
+スプレッドシートのタブに見やすく整形して上書き出力する。
+環境変数：
+- YAHOO_CATEGORY_ID : カンマ区切りで複数可（例 "23260,23264,23268,23272"）
+- YAHOO_SHEET_NAME  : 出力タブ名
+- YAHOO_MIN_PRICE / YAHOO_MAX_PRICE : 現在価格の下限/上限（上限は以上を除外）
+- YAHOO_EXCLUDE     : タイトルにこの語を含む商品を除外（カンマ区切り）
 """
 
 import os
@@ -22,14 +20,6 @@ import gspread
 from mercari_watcher import get_gspread_client
 from yahoo_auction import get_todays_auctions, CATEGORY_ID as DEFAULT_CATEGORY
 
-# ファイル名はリネームされ得るので、不変のファイルIDで開く（利益計算タブと同一ファイル）
-SPREADSHEET_ID = "1MfOt13h8BAS0dcBAcROon8-nFpu3vQ25FTFZflZCYGc"
-
-# カテゴリ・出力タブ・価格下限/上限は環境変数で切替（未指定ならカメラ＝従来どおり）
-CATEGORY_ID = int(os.environ.get("YAHOO_CATEGORY_ID", DEFAULT_CATEGORY))
-MIN_PRICE = int(os.environ.get("YAHOO_MIN_PRICE", "0"))   # 現在価格の下限（0=制限なし）
-MAX_PRICE = int(os.environ.get("YAHOO_MAX_PRICE", "0"))   # 現在価格の上限（0=制限なし、以上を除外）
-
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -37,15 +27,23 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+SPREADSHEET_ID = "1MfOt13h8BAS0dcBAcROon8-nFpu3vQ25FTFZflZCYGc"
+
+_cat_raw = os.environ.get("YAHOO_CATEGORY_ID", str(DEFAULT_CATEGORY))
+CATEGORY_IDS = [int(c.strip()) for c in _cat_raw.split(",") if c.strip()]
+MIN_PRICE = int(os.environ.get("YAHOO_MIN_PRICE", "0"))
+MAX_PRICE = int(os.environ.get("YAHOO_MAX_PRICE", "0"))
+EXCLUDE_WORDS = tuple(w.strip() for w in os.environ.get("YAHOO_EXCLUDE", "").split(",") if w.strip())
+
 JST = ZoneInfo("Asia/Tokyo")
 YAHOO_SHEET = os.environ.get("YAHOO_SHEET_NAME", "ヤフオク終了間近")
-CALC_SHEET = "利益計算"   # 前提セル(B4手数料率/B5固定費/B6送料/B7目標利益率)の参照先
+CALC_SHEET = "利益計算"
 
-# 列: 終了/残/入札/現在/即決/状態/評価/種別/出品者/想定売値/現時点利益/利益率/入札上限/商品/id
-HEADER = ["終了", "残り", "入札", "現在価格", "即決", "状態", "評価", "種別", "出品者",
-          "想定売値", "現時点利益", "利益率", "入札上限", "商品名（クリックで開く）", "id"]
-COL_URIAGE = "想定売値"   # 引き継ぎ用の入力列名
-COL_ID = "id"            # 突き合わせキー列名
+HEADER = ["終了", "残り", "入札", "現在価格", "即決", "商品名（クリックで開く）",
+          "状態", "評価", "種別", "出品者",
+          "想定売値", "現時点利益", "利益率", "入札上限", "id"]
+COL_URIAGE = "想定売値"
+COL_ID = "id"
 
 LOW_BID = 3
 HIGH_BID = 20
@@ -57,11 +55,10 @@ COND_MAP = {
     "USED40": "やや傷汚れ", "USED60": "傷汚れあり", "USED80": "状態悪い",
 }
 
-# 計算式で使う前提セルへの参照（利益計算タブ）
-R_RATE = f"'{CALC_SHEET}'!$B$4"   # 手数料率
-R_FIX = f"'{CALC_SHEET}'!$B$5"    # 固定費
-R_SHIP = f"'{CALC_SHEET}'!$B$6"   # 仕入送料
-R_TARGET = f"'{CALC_SHEET}'!$B$7"  # 目標利益率
+R_RATE = f"'{CALC_SHEET}'!$B$4"
+R_FIX = f"'{CALC_SHEET}'!$B$5"
+R_SHIP = f"'{CALC_SHEET}'!$B$6"
+R_TARGET = f"'{CALC_SHEET}'!$B$7"
 
 
 def _remaining(end: datetime, now: datetime) -> str:
@@ -77,7 +74,6 @@ def _esc(s: str) -> str:
 
 
 def _load_saved_uriage(sheet) -> dict:
-    """既存シートから「商品ID → 想定売値」を読み、入力を引き継ぐための辞書を返す。"""
     try:
         existing = sheet.get_values(value_render_option="UNFORMATTED_VALUE")
     except Exception as e:
@@ -104,7 +100,6 @@ def _load_saved_uriage(sheet) -> dict:
 
 
 def _apply_formatting(ss, sheet, n_rows: int, n_offpeak: int):
-    """見た目を適用（失敗してもデータは残す）。"""
     sid = sheet.id
     last = n_rows + 1
 
@@ -119,7 +114,6 @@ def _apply_formatting(ss, sheet, n_rows: int, n_offpeak: int):
     for _ in range(existing):
         reqs.append({"deleteConditionalFormatRule": {"sheetId": sid, "index": 0}})
 
-    # ヘッダー固定＋白文字濃色背景
     reqs.append({"updateSheetProperties": {
         "properties": {"sheetId": sid, "gridProperties": {"frozenRowCount": 1}},
         "fields": "gridProperties.frozenRowCount"}})
@@ -131,13 +125,12 @@ def _apply_formatting(ss, sheet, n_rows: int, n_offpeak: int):
             "horizontalAlignment": "CENTER"}},
         "fields": "userEnteredFormat(textFormat,backgroundColor,horizontalAlignment)"}})
 
-    # 列幅（0終了〜13商品）。14:idは非表示。
-    widths = [60, 50, 42, 82, 82, 90, 56, 48, 56, 84, 84, 52, 84, 420]
+    widths = [60, 50, 42, 82, 82, 420, 90, 56, 48, 56, 84, 84, 52, 84]
     for i, w in enumerate(widths):
         reqs.append({"updateDimensionProperties": {
             "range": {"sheetId": sid, "dimension": "COLUMNS", "startIndex": i, "endIndex": i + 1},
             "properties": {"pixelSize": w}, "fields": "pixelSize"}})
-    reqs.append({"updateDimensionProperties": {   # id列を隠す
+    reqs.append({"updateDimensionProperties": {
         "range": {"sheetId": sid, "dimension": "COLUMNS", "startIndex": 14, "endIndex": 15},
         "properties": {"hiddenByUser": True}, "fields": "hiddenByUser"}})
 
@@ -155,37 +148,33 @@ def _apply_formatting(ss, sheet, n_rows: int, n_offpeak: int):
 
     GREEN = (0.72, 0.88, 0.72)
     RED = (0.96, 0.78, 0.78)
-    cf(0, 2, 3, "NUMBER_LESS_THAN_EQ", str(LOW_BID), GREEN)      # 入札 少=緑
-    cf(1, 2, 3, "NUMBER_GREATER_THAN_EQ", str(HIGH_BID), RED)   # 入札 多=赤
-    cf(2, 4, 5, "NOT_BLANK", None, (0.80, 0.89, 0.97))          # 即決 青
-    cf(3, 6, 7, "NUMBER_GREATER_THAN_EQ", str(RATING_GOOD), GREEN)  # 評価 優良
-    cf(4, 6, 7, "NUMBER_LESS", str(RATING_BAD), RED)               # 評価 要注意
-    cf(5, 8, 9, "NOT_BLANK", None, (1.0, 0.95, 0.70))          # 出品者タグ 黄
-    cf(6, 10, 11, "NUMBER_GREATER", "0", GREEN)                # 現時点利益 プラス=緑
-    cf(7, 10, 11, "NUMBER_LESS", "0", RED)                     # 現時点利益 マイナス=赤
+    cf(0, 2, 3, "NUMBER_LESS_THAN_EQ", str(LOW_BID), GREEN)
+    cf(1, 2, 3, "NUMBER_GREATER_THAN_EQ", str(HIGH_BID), RED)
+    cf(2, 4, 5, "NOT_BLANK", None, (0.80, 0.89, 0.97))
+    cf(3, 7, 8, "NUMBER_GREATER_THAN_EQ", str(RATING_GOOD), GREEN)
+    cf(4, 7, 8, "NUMBER_LESS", str(RATING_BAD), RED)
+    cf(5, 9, 10, "NOT_BLANK", None, (1.0, 0.95, 0.70))
+    cf(6, 11, 12, "NUMBER_GREATER", "0", GREEN)
+    cf(7, 11, 12, "NUMBER_LESS", "0", RED)
 
-    # ¥表示：現在/即決(3-4) と 想定売値/現時点利益(9-10) と 入札上限(12)
-    for c0, c1 in ((3, 5), (9, 11), (12, 13)):
+    for c0, c1 in ((3, 5), (10, 12), (13, 14)):
         reqs.append({"repeatCell": {
             "range": {"sheetId": sid, "startRowIndex": 1, "endRowIndex": last,
                       "startColumnIndex": c0, "endColumnIndex": c1},
             "cell": {"userEnteredFormat": {"numberFormat": {"type": "NUMBER", "pattern": "¥#,##0"}}},
             "fields": "userEnteredFormat.numberFormat"}})
-    # ％表示：評価(6) と 利益率(11)
-    for c0, c1 in ((6, 7), (11, 12)):
+    for c0, c1 in ((7, 8), (12, 13)):
         reqs.append({"repeatCell": {
             "range": {"sheetId": sid, "startRowIndex": 1, "endRowIndex": last,
                       "startColumnIndex": c0, "endColumnIndex": c1},
             "cell": {"userEnteredFormat": {"numberFormat": {"type": "NUMBER", "pattern": "0.0%"}}},
             "fields": "userEnteredFormat.numberFormat"}})
-    # 想定売値(9)を黄色＝入力欄
     reqs.append({"repeatCell": {
         "range": {"sheetId": sid, "startRowIndex": 1, "endRowIndex": last,
-                  "startColumnIndex": 9, "endColumnIndex": 10},
+                  "startColumnIndex": 10, "endColumnIndex": 11},
         "cell": {"userEnteredFormat": {"backgroundColor": {"red": 1, "green": 0.97, "blue": 0.8}}},
         "fields": "userEnteredFormat.backgroundColor"}})
 
-    # 終了列(A)の時間帯帯色（終了昇順なので狙い目帯は先頭から連続）
     split = 1 + n_offpeak
     if n_offpeak > 0:
         reqs.append({"repeatCell": {
@@ -211,9 +200,8 @@ def write_to_sheet(client, rows: list[dict]):
         sheet = ss.add_worksheet(title=YAHOO_SHEET, rows=1200, cols=len(HEADER))
         logger.info(f"シート「{YAHOO_SHEET}」を新規作成")
 
-    saved = _load_saved_uriage(sheet)   # 既存の想定売値を引き継ぐ（clear前に読む）
+    saved = _load_saved_uriage(sheet)
 
-    # グリッドの列数・行数を確保（列が足りないと書き込みがはみ出してエラーになる）
     need_rows = len(rows) + 5
     new_rows = max(sheet.row_count, need_rows)
     new_cols = max(sheet.col_count, len(HEADER))
@@ -232,25 +220,23 @@ def write_to_sheet(client, rows: list[dict]):
     now = datetime.now(JST)
     values = [HEADER]
     for i, r in enumerate(rows):
-        row = i + 2  # シート上の行番号（1行目ヘッダー）
+        row = i + 2
         link = f'=HYPERLINK("{r["url"]}","{_esc(r["title"])}")'
         uid = r["seller_uid"]
         seller_tag = f"{group_label[uid]}×{uid_counts[uid]}" if uid in group_label else ""
-        uriage = saved.get(r["id"], "")   # 引き継いだ想定売値（無ければ空）
-        # 現時点利益(K) = 想定売値 - 販売手数料 - (現在価格 + 送料)
-        gaineki = (f'=IF($J{row}="","",$J{row}-($J{row}*{R_RATE}+{R_FIX})'
+        uriage = saved.get(r["id"], "")
+        gaineki = (f'=IF($K{row}="","",$K{row}-($K{row}*{R_RATE}+{R_FIX})'
                    f'-($D{row}+{R_SHIP}))')
-        # 利益率(L) = 現時点利益 ÷ 想定売値
-        rieki_ritsu = f'=IF($J{row}="","",$K{row}/$J{row})'
-        # 入札上限(M) = 想定売値 - 販売手数料 - 目標利益 - 送料
-        jougen = (f'=IF($J{row}="","",$J{row}-($J{row}*{R_RATE}+{R_FIX})'
-                  f'-($J{row}*{R_TARGET})-{R_SHIP})')
+        rieki_ritsu = f'=IF($K{row}="","",$L{row}/$K{row})'
+        jougen = (f'=IF($K{row}="","",$K{row}-($K{row}*{R_RATE}+{R_FIX})'
+                  f'-($K{row}*{R_TARGET})-{R_SHIP})')
         values.append([
             r["end_jst"].strftime("%H:%M"),
             _remaining(r["end_jst"], now),
             r["bids"],
             r["price"],
             r["buynow"] if r["buynow"] else "",
+            link,
             COND_MAP.get(r["condition"], r["condition"]),
             r["rating"] if r["rating"] is not None else "",
             "ストア" if r["is_store"] else "個人",
@@ -259,7 +245,6 @@ def write_to_sheet(client, rows: list[dict]):
             gaineki,
             rieki_ritsu,
             jougen,
-            link,
             r["id"],
         ])
 
@@ -283,9 +268,9 @@ def main():
         logger.error(f"Google Sheets 認証失敗: {e}")
         return
 
-    logger.info(f"対象: category={CATEGORY_ID} / タブ「{YAHOO_SHEET}」/ "
-                f"下限¥{MIN_PRICE:,} 上限¥{MAX_PRICE:,}")
-    rows = get_todays_auctions(CATEGORY_ID, MIN_PRICE, MAX_PRICE)
+    logger.info(f"対象: categories={CATEGORY_IDS} / タブ「{YAHOO_SHEET}」/ "
+                f"下限¥{MIN_PRICE:,} 上限¥{MAX_PRICE:,} / 除外{list(EXCLUDE_WORDS)}")
+    rows = get_todays_auctions(CATEGORY_IDS, MIN_PRICE, MAX_PRICE, EXCLUDE_WORDS)
     logger.info(f"今日終了 × 入札あり：{len(rows)} 件")
     write_to_sheet(gc, rows)
     logger.info("===== Yahoo Watcher 完了 =====")
