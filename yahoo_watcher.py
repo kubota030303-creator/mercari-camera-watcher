@@ -41,9 +41,9 @@ JST = ZoneInfo("Asia/Tokyo")
 YAHOO_SHEET = os.environ.get("YAHOO_SHEET_NAME", "ヤフオク終了間近")
 CALC_SHEET = "利益計算"   # 前提セル(B4手数料率/B5固定費/B6送料/B7目標利益率)の参照先
 
-# 列: 終了/残/入札/現在/即決/状態/評価/種別/出品者/想定売値/現時点利益/入札上限/商品/id
+# 列: 終了/残/入札/現在/即決/状態/評価/種別/出品者/想定売値/現時点利益/利益率/入札上限/商品/id
 HEADER = ["終了", "残り", "入札", "現在価格", "即決", "状態", "評価", "種別", "出品者",
-          "想定売値", "現時点利益", "入札上限", "商品名（クリックで開く）", "id"]
+          "想定売値", "現時点利益", "利益率", "入札上限", "商品名（クリックで開く）", "id"]
 COL_URIAGE = "想定売値"   # 引き継ぎ用の入力列名
 COL_ID = "id"            # 突き合わせキー列名
 
@@ -131,14 +131,14 @@ def _apply_formatting(ss, sheet, n_rows: int, n_offpeak: int):
             "horizontalAlignment": "CENTER"}},
         "fields": "userEnteredFormat(textFormat,backgroundColor,horizontalAlignment)"}})
 
-    # 列幅（0終了〜12商品）。13:idは非表示。
-    widths = [60, 50, 42, 82, 82, 90, 56, 48, 56, 84, 84, 84, 420]
+    # 列幅（0終了〜13商品）。14:idは非表示。
+    widths = [60, 50, 42, 82, 82, 90, 56, 48, 56, 84, 84, 52, 84, 420]
     for i, w in enumerate(widths):
         reqs.append({"updateDimensionProperties": {
             "range": {"sheetId": sid, "dimension": "COLUMNS", "startIndex": i, "endIndex": i + 1},
             "properties": {"pixelSize": w}, "fields": "pixelSize"}})
     reqs.append({"updateDimensionProperties": {   # id列を隠す
-        "range": {"sheetId": sid, "dimension": "COLUMNS", "startIndex": 13, "endIndex": 14},
+        "range": {"sheetId": sid, "dimension": "COLUMNS", "startIndex": 14, "endIndex": 15},
         "properties": {"hiddenByUser": True}, "fields": "hiddenByUser"}})
 
     body = {"startRowIndex": 1, "endRowIndex": last}
@@ -164,19 +164,20 @@ def _apply_formatting(ss, sheet, n_rows: int, n_offpeak: int):
     cf(6, 10, 11, "NUMBER_GREATER", "0", GREEN)                # 現時点利益 プラス=緑
     cf(7, 10, 11, "NUMBER_LESS", "0", RED)                     # 現時点利益 マイナス=赤
 
-    # ¥表示：現在/即決(3-4) と 想定売値/現時点利益/入札上限(9-11)
-    for c0, c1 in ((3, 5), (9, 12)):
+    # ¥表示：現在/即決(3-4) と 想定売値/現時点利益(9-10) と 入札上限(12)
+    for c0, c1 in ((3, 5), (9, 11), (12, 13)):
         reqs.append({"repeatCell": {
             "range": {"sheetId": sid, "startRowIndex": 1, "endRowIndex": last,
                       "startColumnIndex": c0, "endColumnIndex": c1},
             "cell": {"userEnteredFormat": {"numberFormat": {"type": "NUMBER", "pattern": "¥#,##0"}}},
             "fields": "userEnteredFormat.numberFormat"}})
-    # 評価(6)を％
-    reqs.append({"repeatCell": {
-        "range": {"sheetId": sid, "startRowIndex": 1, "endRowIndex": last,
-                  "startColumnIndex": 6, "endColumnIndex": 7},
-        "cell": {"userEnteredFormat": {"numberFormat": {"type": "NUMBER", "pattern": "0.0%"}}},
-        "fields": "userEnteredFormat.numberFormat"}})
+    # ％表示：評価(6) と 利益率(11)
+    for c0, c1 in ((6, 7), (11, 12)):
+        reqs.append({"repeatCell": {
+            "range": {"sheetId": sid, "startRowIndex": 1, "endRowIndex": last,
+                      "startColumnIndex": c0, "endColumnIndex": c1},
+            "cell": {"userEnteredFormat": {"numberFormat": {"type": "NUMBER", "pattern": "0.0%"}}},
+            "fields": "userEnteredFormat.numberFormat"}})
     # 想定売値(9)を黄色＝入力欄
     reqs.append({"repeatCell": {
         "range": {"sheetId": sid, "startRowIndex": 1, "endRowIndex": last,
@@ -236,10 +237,12 @@ def write_to_sheet(client, rows: list[dict]):
         uid = r["seller_uid"]
         seller_tag = f"{group_label[uid]}×{uid_counts[uid]}" if uid in group_label else ""
         uriage = saved.get(r["id"], "")   # 引き継いだ想定売値（無ければ空）
-        # 現時点利益 = 想定売値 - 販売手数料 - (現在価格 + 送料)
+        # 現時点利益(K) = 想定売値 - 販売手数料 - (現在価格 + 送料)
         gaineki = (f'=IF($J{row}="","",$J{row}-($J{row}*{R_RATE}+{R_FIX})'
                    f'-($D{row}+{R_SHIP}))')
-        # 入札上限 = 想定売値 - 販売手数料 - 目標利益 - 送料
+        # 利益率(L) = 現時点利益 ÷ 想定売値
+        rieki_ritsu = f'=IF($J{row}="","",$K{row}/$J{row})'
+        # 入札上限(M) = 想定売値 - 販売手数料 - 目標利益 - 送料
         jougen = (f'=IF($J{row}="","",$J{row}-($J{row}*{R_RATE}+{R_FIX})'
                   f'-($J{row}*{R_TARGET})-{R_SHIP})')
         values.append([
@@ -254,6 +257,7 @@ def write_to_sheet(client, rows: list[dict]):
             seller_tag,
             uriage,
             gaineki,
+            rieki_ritsu,
             jougen,
             link,
             r["id"],
