@@ -18,7 +18,7 @@ jobs:
           python-version: '3.12'
       - run: pip install requests gspread google-auth tzdata mercapi
       - run: python yahoo_watcher.py
-                env:
+        env:
           GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
           YAHOO_CATEGORY_ID: '23260,23264,23268,23272'
           YAHOO_SHEET_NAME: '時計終了間近'
