@@ -1,6 +1,6 @@
 """
 yahoo_auction.py
-ヤフオク「カメラ・光学機器」の「今日・夜の激戦前(21時)までに終了 × 入札あり」を取得する。
+ヤフオクのカテゴリ（複数可）の「今日終了 × 入札あり」を取得する。
 検索結果ページHTMLに埋め込まれた __NEXT_DATA__(JSON) をパースするため、
 DOMのクラス名変更に強い。ログイン不要の公開ページのみを対象とする。
 
@@ -12,7 +12,7 @@ import json
 import time
 import math
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime
 from zoneinfo import ZoneInfo
 
 import requests
@@ -20,10 +20,10 @@ import requests
 logger = logging.getLogger(__name__)
 JST = ZoneInfo("Asia/Tokyo")
 
-CATEGORY_ID = 23636          # カメラ・光学機器
-PEAK_HOUR = 21               # これ以降は激戦帯（除外はせず、色で区別するだけ）
+CATEGORY_ID = 23636          # 既定（カメラ・光学機器）
+PEAK_HOUR = 21               # これ以降は激戦帯（除外はせず色で区別）
 PAGE_SIZE = 100
-MAX_PAGES = 12               # 取りこぼし防止（最大1200件）
+MAX_PAGES = 12               # 1カテゴリあたり最大ページ数
 REQUEST_INTERVAL = 1.5       # ページ間の待機秒
 
 HEADERS = {
@@ -49,9 +49,9 @@ def _build_url(begin: int, auchours: int, category_id: int,
            f"?fixed=0&is_postage_mode=1&n={PAGE_SIZE}&b={begin}"
            f"&select=3&mode=3&auchours={auchours}")
     if min_price > 0:
-        url += f"&aucminPrice={min_price}"   # 現在価格の下限
+        url += f"&aucminPrice={min_price}"
     if max_price > 0:
-        url += f"&aucmaxPrice={max_price}"   # 現在価格の上限（取得量も削減）
+        url += f"&aucmaxPrice={max_price}"
     return url
 
 
@@ -74,7 +74,7 @@ def fetch_raw_items(auchours: int, category_id: int, min_price: int = 0,
         resp.raise_for_status()
         batch = _extract_items(resp.text)
         all_items.extend(batch)
-        logger.info(f"page {page+1}: {len(batch)} 件 (累計 {len(all_items)})")
+        logger.info(f"  cat{category_id} page {page+1}: {len(batch)} 件")
         if len(batch) < PAGE_SIZE:
             break
         time.sleep(REQUEST_INTERVAL)
@@ -92,9 +92,11 @@ def _parse_rating(s):
 
 
 def parse_items(raw: list[dict], cutoff: datetime,
-                min_price: int = 0, max_price: int = 0) -> list[dict]:
+                min_price: int = 0, max_price: int = 0,
+                exclude_words: tuple = ()) -> list[dict]:
     """入札あり かつ cutoff までに終了 の商品を、終了が早い順で返す。
-    min_price: 現在価格の下限（未満は除外）。max_price: 上限（以上は除外）。"""
+    min_price/max_price: 現在価格の下限/上限（上限は以上を除外）。
+    exclude_words: タイトルにこの語を含む商品を除外（ジュエリー等を弾く用）。"""
     out = []
     for it in raw:
         if int(it.get("bidCount", 0) or 0) < 1:
@@ -102,7 +104,10 @@ def parse_items(raw: list[dict], cutoff: datetime,
         price = int(it.get("price", 0) or 0)
         if min_price > 0 and price < min_price:
             continue
-        if max_price > 0 and price >= max_price:   # 上限以上は除外（例:5万以上を弾く）
+        if max_price > 0 and price >= max_price:
+            continue
+        title = it.get("title", "")
+        if exclude_words and any(w in title for w in exclude_words):
             continue
         end = datetime.fromisoformat(it["endTime"]).astimezone(JST)
         if end > cutoff:
@@ -110,30 +115,42 @@ def parse_items(raw: list[dict], cutoff: datetime,
         seller = it.get("seller") or {}
         out.append({
             "end_jst": end,
-            "is_peak": end.hour >= PEAK_HOUR,   # 21時以降＝激戦帯
+            "is_peak": end.hour >= PEAK_HOUR,
             "bids": int(it.get("bidCount", 0) or 0),
-            "price": int(it.get("price", 0) or 0),
+            "price": price,
             "buynow": it.get("buyNowPrice"),
             "condition": it.get("itemCondition", ""),
-            "rating": _parse_rating(seller.get("goodRating")),  # 良い評価率(0-1)
-            "is_store": bool(seller.get("isStore")),            # ストア出品か
-            "seller_uid": seller.get("userId", ""),             # 出品者固有ID(名前は非公開)
-            "title": it.get("title", ""),
+            "rating": _parse_rating(seller.get("goodRating")),
+            "is_store": bool(seller.get("isStore")),
+            "seller_uid": seller.get("userId", ""),
+            "title": title,
             "id": it["auctionId"],
             "url": f"https://page.auctions.yahoo.co.jp/jp/auction/{it['auctionId']}",
         })
-    out.sort(key=lambda x: x["end_jst"])   # 終了が早い順（＝狙い目帯が上に集まる）
+    out.sort(key=lambda x: x["end_jst"])
     return out
 
 
-def get_todays_auctions(category_id: int = CATEGORY_ID,
-                        min_price: int = 0, max_price: int = 0) -> list[dict]:
+def get_todays_auctions(category_ids, min_price: int = 0, max_price: int = 0,
+                        exclude_words: tuple = ()) -> list[dict]:
     """今日中に終了 × 入札あり を全部取得（終了が早い順）。
-    category_idでカテゴリ切替、min_price/max_priceで現在価格の下限・上限。"""
+    category_ids: int もしくは int のリスト（複数カテゴリ対応）。
+    複数カテゴリは順に取得し、商品IDで重複排除してまとめる。"""
+    if isinstance(category_ids, int):
+        category_ids = [category_ids]
     now = datetime.now(JST)
     cutoff = _cutoff(now)
     hours = max(1, math.ceil((cutoff - now).total_seconds() / 3600))
     logger.info(f"取得窓: 〜{cutoff.strftime('%H:%M')} (auchours={hours}, "
-                f"category={category_id}, min={min_price}, max={max_price})")
-    raw = fetch_raw_items(hours, category_id, min_price, max_price)
-    return parse_items(raw, cutoff, min_price, max_price)
+                f"categories={category_ids}, min={min_price}, max={max_price})")
+
+    raw_all, seen = [], set()
+    for cid in category_ids:
+        raw = fetch_raw_items(hours, cid, min_price, max_price)
+        for it in raw:
+            aid = it.get("auctionId")
+            if aid and aid not in seen:
+                seen.add(aid)
+                raw_all.append(it)
+    logger.info(f"全カテゴリ合計（重複排除後）: {len(raw_all)} 件")
+    return parse_items(raw_all, cutoff, min_price, max_price, exclude_words)
