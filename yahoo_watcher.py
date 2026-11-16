@@ -18,8 +18,11 @@ from zoneinfo import ZoneInfo
 
 import gspread
 
-from mercari_watcher import get_gspread_client, SPREADSHEET_NAME
+from mercari_watcher import get_gspread_client
 from yahoo_auction import get_todays_auctions
+
+# ファイル名はリネームされ得るので、不変のファイルIDで開く（利益計算タブと同一ファイル）
+SPREADSHEET_ID = "1MfOt13h8BAS0dcBAcROon8-nFpu3vQ25FTFZflZCYGc"
 
 logging.basicConfig(
     level=logging.INFO,
@@ -194,7 +197,7 @@ def _apply_formatting(ss, sheet, n_rows: int, n_offpeak: int):
 
 
 def write_to_sheet(client, rows: list[dict]):
-    ss = client.open(SPREADSHEET_NAME)
+    ss = client.open_by_key(SPREADSHEET_ID)
     try:
         sheet = ss.worksheet(YAHOO_SHEET)
     except gspread.WorksheetNotFound:
