@@ -3,6 +3,7 @@ mercari_auction.py
 mercapi の DPoP 署名だけ再利用し、オークション絞り込み検索を自前で投げて
 auction フィールド(bidDeadline/totalBid/...)を読む。
 「今日(JST)終了 × 入札あり」を抽出して返す。
+カテゴリ・価格は呼び出し側から指定可（複数カテゴリはリストで一括指定）。
 """
 
 import asyncio
@@ -21,7 +22,6 @@ JST = ZoneInfo("Asia/Tokyo")
 SEARCH_URL = "https://api.mercari.jp/v2/entities:search"
 
 # オークション attribute（キャプチャした searchCondition より）
-# ※ リクエスト側の正確な形は DevTools の Request payload で要確認（下記は response 由来の推定）
 AUCTION_ATTRIBUTE = {
     "id": "d664efe3-ae5a-4824-b729-e789bf93aba9",
     "values": [
@@ -30,10 +30,11 @@ AUCTION_ATTRIBUTE = {
     ],
 }
 
-CAMERA_TOP_CATEGORY = 97  # カメラ・光学機器（キャプチャの categoryId と一致）
+CAMERA_TOP_CATEGORY = 97  # 既定（カメラ・光学機器）
 
 
-def _build_search_body(page_token: str = "") -> dict:
+def _build_search_body(page_token: str, category_ids: list,
+                       price_min: int, price_max: int) -> dict:
     return {
         "userId": "",
         "pageSize": 120,
@@ -48,11 +49,11 @@ def _build_search_body(page_token: str = "") -> dict:
             "order": "ORDER_DESC",
             "status": ["STATUS_ON_SALE"],
             "sizeId": [],
-            "categoryId": [CAMERA_TOP_CATEGORY],
+            "categoryId": list(category_ids),   # 複数カテゴリはここにまとめて指定
             "brandId": [],
             "sellerId": [],
-            "priceMin": 5000,
-            "priceMax": 0,
+            "priceMin": price_min,
+            "priceMax": price_max,
             "itemConditionId": [],
             "shippingPayerId": [],
             "shippingFromArea": [],
@@ -70,7 +71,7 @@ def _build_search_body(page_token: str = "") -> dict:
         "withItemPromotions": True,
         "withItemSizes": True,
         "useDynamicAttribute": True,
-        "withAuction": True,   # ★ これが無いと auction フィールド(bidDeadline/totalBid)が返らない
+        "withAuction": True,   # これが無いと auction フィールド(bidDeadline/totalBid)が返らない
     }
 
 
@@ -79,13 +80,14 @@ def _signed_request(m: Mercapi, body: dict) -> Request:
     return m._sign_request(req)  # mercapi の DPoP 署名を再利用
 
 
-async def fetch_auction_items_async(max_pages: int = 8) -> list[dict]:
+async def fetch_auction_items_async(category_ids: list, price_min: int,
+                                    price_max: int, max_pages: int = 8) -> list[dict]:
     """オークション商品を全ページ取得し、生の item dict のリストを返す。"""
     m = Mercapi()
     items: list[dict] = []
     page_token = ""
     for page in range(max_pages):
-        body = _build_search_body(page_token)
+        body = _build_search_body(page_token, category_ids, price_min, price_max)
         res = await m._client.send(_signed_request(m, body))
         res.raise_for_status()
         data = res.json()
@@ -102,8 +104,9 @@ def _parse_deadline(s: str) -> datetime:
     return datetime.fromisoformat(s.replace("Z", "+00:00")).astimezone(JST)
 
 
-def pick_today_with_bids(items: list[dict], today=None) -> list[dict]:
-    """今日(JST)終了 × 入札あり を抽出し、終了が早い順に並べる。"""
+def pick_today_with_bids(items: list[dict], today=None, price_max: int = 0) -> list[dict]:
+    """今日(JST)終了 × 入札あり を抽出し、終了が早い順に並べる。
+    price_max>0 のとき、現在価格がそれ以上の商品は除外（保険の二重フィルタ）。"""
     if today is None:
         today = datetime.now(JST).date()
     out = []
@@ -118,6 +121,8 @@ def pick_today_with_bids(items: list[dict], today=None) -> list[dict]:
         if deadline.date() != today:           # 今日終了以外を除外
             continue
         highest = int(auc.get("highestBid", it.get("price", 0)) or 0)
+        if price_max > 0 and highest >= price_max:   # 上限以上は除外
+            continue
         initial = int(auc.get("initialPrice", 0) or 0)
         out.append({
             "id": it["id"],
@@ -136,6 +141,11 @@ def pick_today_with_bids(items: list[dict], today=None) -> list[dict]:
     return out
 
 
-def get_today_auction_list(max_pages: int = 8, today=None) -> list[dict]:
-    items = asyncio.run(fetch_auction_items_async(max_pages))
-    return pick_today_with_bids(items, today)
+def get_today_auction_list(category_ids=None, price_min: int = 5000,
+                           price_max: int = 0, max_pages: int = 8,
+                           today=None) -> list[dict]:
+    """今日終了×入札あり を取得。category_ids 未指定ならカメラ(97)。"""
+    if not category_ids:
+        category_ids = [CAMERA_TOP_CATEGORY]
+    items = asyncio.run(fetch_auction_items_async(category_ids, price_min, price_max, max_pages))
+    return pick_today_with_bids(items, today, price_max)
