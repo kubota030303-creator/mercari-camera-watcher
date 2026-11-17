@@ -1,21 +1,24 @@
 """
 auction_watcher.py
-「今日(JST)終了 × 入札あり」のオークション商品を取得し、
-スプレッドシートのタブ「本日終了オークション」に毎回上書き出力する。
-GitHub Actions で朝・夕にスケジュール実行する想定。
+「今日(JST)終了 × 入札あり」のメルカリ オークション商品を取得し、
+スプレッドシートの指定タブに毎回上書き出力する。
+GitHub Actions でスケジュール実行する想定。
 
-既存の mercari_watcher.py と同じリポジトリに置き、
-get_gspread_client / SPREADSHEET_NAME を再利用する。
+環境変数で切替（未指定ならカメラ＝従来どおり）：
+- MERCARI_CATEGORY_ID : カンマ区切りで複数可（例 "24,39"）。既定 97(カメラ)
+- MERCARI_SHEET_NAME  : 出力タブ名。既定「本日終了オークション」
+- MERCARI_PRICE_MIN / MERCARI_PRICE_MAX : 現在価格の下限/上限（上限は以上を除外）
 """
 
+import os
 import logging
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
 import gspread
 
-from mercari_watcher import get_gspread_client, SPREADSHEET_NAME
-from mercari_auction import get_today_auction_list
+from mercari_watcher import get_gspread_client
+from mercari_auction import get_today_auction_list, CAMERA_TOP_CATEGORY
 
 logging.basicConfig(
     level=logging.INFO,
@@ -25,7 +28,15 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 JST = ZoneInfo("Asia/Tokyo")
-AUCTION_SHEET = "本日終了オークション"
+
+# ファイル名はリネームされ得るので、不変のファイルIDで開く（名前変更に強い）
+SPREADSHEET_ID = "1MfOt13h8BAS0dcBAcROon8-nFpu3vQ25FTFZflZCYGc"
+
+_cat_raw = os.environ.get("MERCARI_CATEGORY_ID", str(CAMERA_TOP_CATEGORY))
+CATEGORY_IDS = [int(c.strip()) for c in _cat_raw.split(",") if c.strip()]
+PRICE_MIN = int(os.environ.get("MERCARI_PRICE_MIN", "5000"))
+PRICE_MAX = int(os.environ.get("MERCARI_PRICE_MAX", "0"))
+AUCTION_SHEET = os.environ.get("MERCARI_SHEET_NAME", "本日終了オークション")
 
 HEADER = ["終了時刻", "残り", "入札", "現在価格", "開始価格",
           "値上がり", "ブランド", "カテゴリID", "状態", "商品名", "URL"]
@@ -41,7 +52,7 @@ def _remaining(deadline: datetime, now: datetime) -> str:
 
 
 def write_to_sheet(client, rows: list[dict]):
-    ss = client.open(SPREADSHEET_NAME)
+    ss = client.open_by_key(SPREADSHEET_ID)
     try:
         sheet = ss.worksheet(AUCTION_SHEET)
     except gspread.WorksheetNotFound:
@@ -72,13 +83,17 @@ def write_to_sheet(client, rows: list[dict]):
 
 def main():
     logger.info("===== Auction Watcher 起動 =====")
+    logger.info(f"対象: categories={CATEGORY_IDS} / タブ「{AUCTION_SHEET}」/ "
+                f"下限¥{PRICE_MIN:,} 上限¥{PRICE_MAX:,}")
     try:
         gc = get_gspread_client()
     except Exception as e:
         logger.error(f"Google Sheets 認証失敗: {e}")
         return
 
-    rows = get_today_auction_list(max_pages=8)
+    rows = get_today_auction_list(category_ids=CATEGORY_IDS,
+                                  price_min=PRICE_MIN, price_max=PRICE_MAX,
+                                  max_pages=8)
     logger.info(f"今日終了 × 入札あり：{len(rows)} 件")
 
     if not rows:
