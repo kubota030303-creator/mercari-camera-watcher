@@ -1,0 +1,26 @@
+name: mercari-watch-auction
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '9 19 * * *'      # 04:09 JST
+    - cron: '9 1 * * *'       # 10:09 JST
+    - cron: '9 6 * * *'       # 15:09 JST
+    - cron: '9 8 * * *'       # 17:09 JST
+
+jobs:
+  auction:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install mercapi gspread google-auth requests tzdata
+      - run: python auction_watcher.py
+        env:
+          GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
+          MERCARI_CATEGORY_ID: '24,39'
+          MERCARI_SHEET_NAME: 'メルカリ時計終了'
+          MERCARI_PRICE_MIN: '5000'
+          MERCARI_PRICE_MAX: '50000'
